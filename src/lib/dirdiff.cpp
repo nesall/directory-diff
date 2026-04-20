@@ -1,4 +1,4 @@
-#include "dirdiff.h"
+#include "directory-diff/dirdiff.h"
 #include <map>
 #include <fstream>
 #include <sstream>

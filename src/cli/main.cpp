@@ -1,9 +1,9 @@
 #include <iostream>
 #include <filesystem>
-#include <3rdparty/CLI11.hpp>
-#include <3rdparty/fmt/core.h>
+#include <directory-diff/3rdparty/CLI11.hpp>
+#include <directory-diff/3rdparty/fmt/format.h>
 #include <utils_log/logger.hpp>
-#include "dirdiff.h"
+#include "directory-diff/dirdiff.h"
 
 namespace fs = std::filesystem;
 

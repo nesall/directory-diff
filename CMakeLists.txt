@@ -23,55 +23,49 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(utils_log)
 
-
-# logging
 add_library(utils_log INTERFACE)
 target_include_directories(utils_log INTERFACE ${utils_log_SOURCE_DIR})
 
-
-# Create executable
-add_executable(${PROJECT_NAME} 
-  README.md
-  include/dirdiff.h
-  include/filediff.h
-  src/main.cpp
-  src/dirdiff.cpp
-  src/filediff.cpp
-  src/xxhash.c
+add_library(directory_diff_lib
+  src/lib/filediff.cpp
+  src/lib/dirdiff.cpp
+  src/lib/xxhash.c
 )
 
-# Link libraries
-target_link_libraries(${PROJECT_NAME} PRIVATE 
-  utils_log
+target_include_directories(directory_diff_lib
+  PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+  PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/lib
+    ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty
 )
 
-# Include directories
-target_include_directories(${PROJECT_NAME} 
-  PRIVATE 
-  include/
+target_link_libraries(directory_diff_lib
+  PUBLIC utils_log
+  PRIVATE Threads::Threads
 )
 
-target_compile_definitions(${PROJECT_NAME} PRIVATE
+target_compile_definitions(directory_diff_lib PRIVATE
   FMT_HEADER_ONLY
   FMT_USE_LOCALE=0
 )
 
-# Enable threading (required by hnswlib)
-find_package(Threads REQUIRED)
-target_link_libraries(${PROJECT_NAME} PRIVATE Threads::Threads )
+add_executable(directory_diff_cli
+  src/cli/main.cpp
+)
 
+target_link_libraries(directory_diff_cli
+  PRIVATE directory_diff_lib
+)
 
-# Platform-specific settings
 if(WIN32)
-  target_link_libraries(${PROJECT_NAME} PRIVATE ws2_32 wsock32)
-endif()
-
-if(APPLE)
+  target_link_libraries(directory_diff_lib PRIVATE ws2_32 wsock32)
+elseif(APPLE)
   find_library(COCOA Cocoa)
   find_library(COREFOUNDATION CoreFoundation REQUIRED)
-  target_link_libraries(${PROJECT_NAME} PRIVATE ${COCOA} ${COREFOUNDATION})
+  target_link_libraries(directory_diff_lib PRIVATE ${COCOA} ${COREFOUNDATION})
+else()
+  target_link_libraries(directory_diff_lib PRIVATE dl)
 endif()
 
-if(UNIX AND NOT APPLE)
-  target_link_libraries(${PROJECT_NAME} PRIVATE dl)
-endif()
+find_package(Threads REQUIRED)
