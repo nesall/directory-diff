@@ -147,20 +147,10 @@ size_t diffDirectories(
             size_t i = index.fetch_add(1);
             if (i >= work.size()) break;
             const auto& job = work[i];
-            //bool identical = false;
-            //if (options.useHash) {
-            //  auto hashA = hashFileContents(job.pathA);
-            //  auto hashB = hashFileContents(job.pathB);
-            //  identical = (hashA && hashB && *hashA == *hashB);
-            //  if (identical) {
-            //    nofIdentical++;
-            //  }
-            //} else {
-            //  // Treating as modified for simplicity.
-            //  identical = false;
-            //}
-            //results[i] = identical ? DiffType::Identical : DiffType::Modified;
             auto df = diffFile(job.pathA, job.pathB, options);
+            if (df == DiffType::Identical) {
+              ++nofIdentical;
+             }
             results[i] = df;
           }
         });
@@ -175,7 +165,7 @@ size_t diffDirectories(
 
   // Report differences
   for (const auto& [relativePath, diffType] : fileMap) {
-    if (diffType != DiffType::Identical) {
+    if (options.includeIdentical || diffType != DiffType::Identical) {
       onDiffFound({ relativePath, diffType });
     }
   }

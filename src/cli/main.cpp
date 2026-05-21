@@ -69,19 +69,20 @@ int main(int argc, char* argv[]) {
       DiffOptions options;
       options.useHash = true;
       options.ignorePatterns = ignoreList;
-      diffDirectories(dir_a, dir_b, options, [&ansiColors](const FileDiff& diff) {
+      options.includeIdentical = false;
+      size_t nofIdentical = diffDirectories(dir_a, dir_b, options, [&ansiColors](const FileDiff& diff) {
         char symbol = '?';
         switch (diff.type) {
         case DiffType::Added: symbol = '+'; break;
         case DiffType::Removed: symbol = '-'; break;
         case DiffType::Modified: symbol = '~'; break;
-        case DiffType::Identical: symbol = ' '; break; // Should not be reported
+        case DiffType::Identical: symbol = '='; break; // Should not be reported
         }
-        if (symbol != ' ') {
-          std::string color = "\033[" + ansiColors[symbol] + "m";
-          std::cout << color << '[' << symbol << "] " << "\033[0m" << diff.relativePath.string() << std::endl;
-        }
+        std::string color = "\033[" + ansiColors[symbol] + "m";
+        std::cout << color << '[' << symbol << "] " << "\033[0m" << diff.relativePath.string() << std::endl;
         });
+      std::cout << "Comparison complete." << std::endl;
+      std::cout << "Nof identical files: " << nofIdentical << std::endl;
     } else {
       std::cerr << "No subcommand specified. Use --help for usage information." << std::endl;
     }

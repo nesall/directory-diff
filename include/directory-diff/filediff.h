@@ -14,6 +14,7 @@ struct FileDiff {
 struct DiffOptions {
   bool useHash = true;
   bool ignoreHidden = false;
+  bool includeIdentical = false;
   std::vector<std::string> ignorePatterns;
 };
 

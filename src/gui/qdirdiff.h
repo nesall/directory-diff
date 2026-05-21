@@ -1,0 +1,178 @@
+#pragma once
+#include <QIcon>
+#include <QWidget>
+#include <QComboBox>
+#include <QToolButton>
+#include <QTreeView>
+#include <QSplitter>
+#include <QFutureWatcher>
+#include <QSortFilterProxyModel>
+
+#include "directory-diff/dirdiff.h"
+
+class QGenericPanelHeader;
+class QDirDiffModel;
+class QDirDiffProxyModel;
+struct DirDiffNode;
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+class QDirDiffWidget : public QWidget {
+  Q_OBJECT
+public:
+  explicit QDirDiffWidget(QWidget* parent = nullptr);
+
+  void compareDirs();
+  QDirDiffProxyModel *proxyModel() const { return proxy_; }
+  QString leftPath()  const;
+  QString rightPath() const;
+
+Q_SIGNALS:
+  void statusMessage(const QString& msg);
+  void compareStarted();
+  void compareFinished();
+  void compareFileRequested(const QString &leftFile, const QString &rightFile);
+
+private Q_SLOTS:
+  void onDiffFinished();
+
+private:
+  void setupViews();
+  void syncExpansion(QTreeView* source, QTreeView* target, const QModelIndex& idx, bool expanded);
+  QString relPathForNode(DirDiffNode* node) const;
+  void copyFile(const QModelIndex& idx, bool leftToRight);
+  void copyDir(const QModelIndex& idx, bool leftToRight);
+  void copySelection(bool leftToRight);
+  void deleteFile(const QModelIndex &idx, bool leftSide);
+  void expandAll(bool expand);
+
+private:
+  QGenericPanelHeader * headerLeft_ = nullptr;
+  QGenericPanelHeader * headerRight_ = nullptr;
+  QTreeView* viewLeft_ = nullptr;
+  QTreeView* viewRight_ = nullptr;
+  QSplitter* splitter_ = nullptr;
+  QDirDiffModel* model_ = nullptr;
+  QDirDiffProxyModel *proxy_ = nullptr;
+
+  // async worker
+  QFutureWatcher<std::vector<FileDiff>>* watcher_ = nullptr;
+  bool syncingExpansion_ = false;
+  bool syncingSelection_ = false;
+};
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+class QGenericPanelHeader : public QWidget {
+  Q_OBJECT;
+public:
+  explicit QGenericPanelHeader(const QString& side, bool dirPanel, QWidget* parent = nullptr);
+
+  QString currentPath() const;
+  void setPath(const QString& path);
+
+Q_SIGNALS:
+  void pathChanged(const QString& path);
+  void returnPressed();
+
+private:
+  void saveHistory(const QString& path);
+  void loadHistory();
+
+private:
+  bool dirPanel_ = false;
+  QComboBox* pathCombo_ = nullptr;
+  QToolButton* browseBtn_ = nullptr;
+};
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct DirDiffNode {
+  QString name;
+  DiffType diffType = DiffType::Identical;
+  bool isDir = false;
+
+  DirDiffNode* parent = nullptr;
+  std::vector<std::unique_ptr<DirDiffNode>> children;
+
+  DiffType properChildDiff() const;
+
+  DirDiffNode* findOrAddChild(const QString& childName, bool dir);
+};
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum class DiffColumn {
+  LeftName = 0, // filename shown in left panel
+  DiffMark = 1, // ← → ↔ ≠ symbol in the centre column
+  RightName = 2, // filename shown in right panel
+  Count
+};
+
+// Extra roles
+enum DirDiffRole {
+  DiffTypeRole = Qt::UserRole + 1,   // DiffType as int
+  IsDirRole = Qt::UserRole + 2,
+};
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+class QDirDiffModel : public QAbstractItemModel {
+  Q_OBJECT
+public:
+  explicit QDirDiffModel(QObject* parent = nullptr);
+
+  // Rebuild the whole tree from a diff result.
+  void setDiffResults(const std::vector<FileDiff>& diffs, const QString& dirA, const QString& dirB);
+
+  void clear();
+
+  QModelIndex index(int row, int column, const QModelIndex& parent = {}) const override;
+  QModelIndex parent(const QModelIndex& child) const override;
+  int rowCount(const QModelIndex& parent = {}) const override;
+  int columnCount(const QModelIndex& parent = {}) const override;
+  QVariant data(const QModelIndex& index, int role = Qt::DisplayRole) const override;
+  QVariant headerData(int section, Qt::Orientation orientation, int role = Qt::DisplayRole) const override;
+
+  // nullptr => root
+  DirDiffNode* nodeForIndex(const QModelIndex& idx) const;
+
+private:
+  void propagateDiffTypes(DirDiffNode* node);
+
+  std::unique_ptr<DirDiffNode> root_;
+  QString dirA_;
+  QString dirB_;
+  mutable QIcon iconFolder_;
+  mutable QIcon iconFile_;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+class QDirDiffProxyModel : public QSortFilterProxyModel {
+  Q_OBJECT
+public:
+  explicit QDirDiffProxyModel(QObject *parent = nullptr);
+
+public slots:
+  void setShowIdentical(bool show);
+  void setShowModified(bool show);
+  void setShowAdded(bool show);
+  void setShowRemoved(bool show);
+
+protected:
+  bool filterAcceptsRow(int sourceRow, const QModelIndex &sourceParent) const override;
+
+private:
+  bool rowOrAnyChildAccepted(int sourceRow, const QModelIndex &sourceParent) const;
+  bool diffTypeAccepted(DiffType t) const;
+
+  bool showIdentical_ = true;
+  bool showModified_ = true;
+  bool showAdded_ = true;
+  bool showRemoved_ = true;
+};
