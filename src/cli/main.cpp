@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <directory-diff/3rdparty/CLI11.hpp>
 #include <directory-diff/3rdparty/fmt/format.h>
+#include <directory-diff/3rdparty/fmt/ranges.h>
 #include <utils_log/logger.hpp>
 #include "directory-diff/dirdiff.h"
 
