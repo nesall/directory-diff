@@ -32,6 +32,9 @@
 #define DIRDIFF_HISTORY_KEY  "DirDiffHistory"
 #define FILEDIFF_HISTORY_KEY  "FileDiffHistory"
 
+namespace {
+  constexpr auto exclusionsSettingsKey = "DirectoryDiff/exclusions";
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -46,6 +49,7 @@ QGenericPanelHeader::QGenericPanelHeader(const QString &side, bool dirPanel, QWi
   label->setMinimumWidth(32);
   pathCombo_ = new QComboBox(this);
   pathCombo_->setEditable(true);
+  pathCombo_->setInsertPolicy(QComboBox::NoInsert);
   pathCombo_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
   browseBtn_ = new QToolButton(this);
   browseBtn_->setText("...");
@@ -103,11 +107,12 @@ void QGenericPanelHeader::setPath(const QString &path)
 
 void QGenericPanelHeader::saveHistory(const QString &path)
 {
-  if (path.trimmed().isEmpty()) return;
+  const QString entry = dirPanel_ ? path.trimmed() : path;
+  if (entry.isEmpty() || (dirPanel_ && !QFileInfo(entry).isDir())) return;
   QSettings s;
   QStringList h = s.value(dirPanel_ ? DIRDIFF_HISTORY_KEY : FILEDIFF_HISTORY_KEY).toStringList();
-  h.removeAll(path);
-  h.append(path);
+  h.removeAll(entry);
+  h.append(entry);
   while (h.size() > DIRDIFF_HISTORY_SIZE)
     h.removeFirst();
   s.setValue(dirPanel_ ? DIRDIFF_HISTORY_KEY : FILEDIFF_HISTORY_KEY, h);
@@ -120,8 +125,10 @@ void QGenericPanelHeader::loadHistory()
   pathCombo_->clear();
   QSettings s;
   const QStringList h = s.value(dirPanel_ ? DIRDIFF_HISTORY_KEY : FILEDIFF_HISTORY_KEY).toStringList();
-  for (const QString &p : h)
-    pathCombo_->addItem(p);
+  for (const QString &p : h) {
+    if (!dirPanel_ || (!p.trimmed().isEmpty() && QFileInfo(p.trimmed()).isDir()))
+      pathCombo_->addItem(p);
+  }
   if (!current.isEmpty())
     pathCombo_->setCurrentText(current);
 }
@@ -168,10 +175,39 @@ namespace {
 // ─────────────────────────────────────────────────────────────────────────────
 
 namespace {
+  class QDirDiffTreeView : public QTreeView {
+  public:
+    QDirDiffTreeView(DiffColumn nameColumn, QWidget *parent)
+      : QTreeView(parent), nameColumn_(static_cast<int>(nameColumn)) {}
+
+  protected:
+    void drawBranches(QPainter *painter, const QRect &rect, const QModelIndex &index) const override {
+      if (index.siblingAtColumn(nameColumn_).data().isValid())
+        QTreeView::drawBranches(painter, rect, index);
+    }
+
+  private:
+    int nameColumn_;
+  };
+
   class QCompactDelegate : public QStyledItemDelegate {
   public:
-    QCompactDelegate(QWidget *parent) : QStyledItemDelegate(parent) {}
+    QCompactDelegate(QWidget *parent) : QStyledItemDelegate(parent), owner_(parent) {}
+
+    QSize sizeHint(const QStyleOptionViewItem &option, const QModelIndex &index) const override {
+      QSize size = QStyledItemDelegate::sizeHint(option, index);
+      // QTreeView uses its first row to measure every row in uniform-height mode.
+      const int iconHeight = owner_->style()->pixelMetric(QStyle::PM_SmallIconSize, nullptr, owner_);
+      size.setHeight(qMax(owner_->fontMetrics().height(), iconHeight) + 2);
+      return size;
+    }
+
     void paint(QPainter *painter, const QStyleOptionViewItem &option, const QModelIndex &index) const override {
+      if (!index.data().isValid()) {
+        QStyledItemDelegate::paint(painter, option, index);
+        return;
+      }
+
       QStyleOptionViewItem opt = option;
       initStyleOption(&opt, index);
 
@@ -199,6 +235,9 @@ namespace {
       }
       QStyledItemDelegate::paint(painter, opt, index);
     }
+
+  private:
+    QWidget *owner_;
   };
 } // anonymous namespace
 
@@ -218,8 +257,8 @@ QDirDiffWidget::QDirDiffWidget(QWidget *parent)
   proxy_ = new QDirDiffProxyModel(this);
   proxy_->setSourceModel(model_);
 
-  viewLeft_ = new QTreeView(this);
-  viewRight_ = new QTreeView(this);
+  viewLeft_ = new QDirDiffTreeView(DiffColumn::LeftName, this);
+  viewRight_ = new QDirDiffTreeView(DiffColumn::RightName, this);
   setupViews();
 
   splitter_ = new QSplitter(Qt::Horizontal, this);
@@ -236,8 +275,8 @@ QDirDiffWidget::QDirDiffWidget(QWidget *parent)
   layout->addWidget(headerBar);
   layout->addWidget(splitter_, 1);
 
-  watcher_ = new QFutureWatcher<std::vector<FileDiff>>(this);
-  connect(watcher_, &QFutureWatcher<std::vector<FileDiff>>::finished, this, &QDirDiffWidget::onDiffFinished);
+  watcher_ = new QFutureWatcher<ComparisonResult>(this);
+  connect(watcher_, &QFutureWatcher<ComparisonResult>::finished, this, &QDirDiffWidget::onDiffFinished);
   connect(headerLeft_, &QGenericPanelHeader::returnPressed, this, [this] { compareDirs(); });
   connect(headerRight_, &QGenericPanelHeader::returnPressed, this, [this] { compareDirs(); });
 }
@@ -257,6 +296,8 @@ void QDirDiffWidget::setupViews()
   for (QTreeView *v : { viewLeft_, viewRight_ }) {
     v->setItemDelegate(delegate);
     v->setUniformRowHeights(true);
+    // Reserve the same viewport height even if only one pane needs horizontal scrolling.
+    v->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
     v->setIndentation(12);
     v->setStyleSheet("QTreeView::item { padding-top: 0px; padding-bottom: 0px; }");
     v->setAnimated(false);
@@ -279,29 +320,30 @@ void QDirDiffWidget::setupViews()
   connect(viewRight_, &QTreeView::expanded, this, [this](const QModelIndex &idx) { syncExpansion(viewRight_, viewLeft_, idx, true); });
   connect(viewRight_, &QTreeView::collapsed, this, [this](const QModelIndex &idx) { syncExpansion(viewRight_, viewLeft_, idx, false); });
 
-  auto connectSyncSelection = [this](const QModelIndex &current, const QModelIndex &, QTreeView *source, QTreeView *target)
+  auto connectSyncSelection = [this](QTreeView *source, QTreeView *target, DiffColumn targetColumn)
     {
-      connect(source->selectionModel(), &QItemSelectionModel::currentChanged, this, [this, target]
+      connect(source->selectionModel(), &QItemSelectionModel::currentChanged, this, [this, target, targetColumn]
       (const QModelIndex &current, const QModelIndex &)
         {
           if (syncingSelection_) return;
           syncingSelection_ = true;
-          target->selectionModel()->setCurrentIndex(current,
+          const QModelIndex counterpart = current.siblingAtColumn(static_cast<int>(targetColumn));
+          target->selectionModel()->setCurrentIndex(counterpart,
             QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
-          target->scrollTo(current);
+          target->scrollTo(counterpart);
           syncingSelection_ = false;
         }
       );
     };
-  connectSyncSelection(viewLeft_->selectionModel()->currentIndex(), {}, viewLeft_, viewRight_);
-  connectSyncSelection(viewRight_->selectionModel()->currentIndex(), {}, viewRight_, viewLeft_);
+  connectSyncSelection(viewLeft_, viewRight_, DiffColumn::RightName);
+  connectSyncSelection(viewRight_, viewLeft_, DiffColumn::LeftName);
 
   for (QTreeView *v : { viewLeft_, viewRight_ }) {
     v->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(v, &QWidget::customContextMenuRequested, this, [this, v](const QPoint &pos)
       {
         const QModelIndex idx = v->indexAt(pos);
-        if (!idx.isValid()) return;
+        if (!idx.isValid() || !idx.data().isValid()) return;
 
         auto selectedIndexes = v->selectionModel()->selectedRows();
 
@@ -317,10 +359,8 @@ void QDirDiffWidget::setupViews()
         auto *actDel = menu.addAction(tr("Delete"));
 
         DirDiffNode *node = model_->nodeForIndex(proxy_->mapToSource(idx));
-        //actLR->setEnabled(node->diffType != DiffType::Added);   // Added means only exists in right
-        //actRL->setEnabled(node->diffType != DiffType::Removed); // Removed means only exists in left
-        //actDel->setEnabled(node->diffType != DiffType::Identical);
-        actDel->setEnabled(selectedIndexes.size() == 1);
+        const bool existsOnSide = v == viewLeft_ ? node->existsOnLeft : node->existsOnRight;
+        actDel->setEnabled(existsOnSide && selectedIndexes.size() == 1);
         connect(actLR, &QAction::triggered, this, [this] { copySelection(true);  });
         connect(actRL, &QAction::triggered, this, [this] { copySelection(false); });
         connect(actDel, &QAction::triggered, this, [this, idx, v] { deleteFile(idx, v == viewLeft_); });
@@ -333,7 +373,8 @@ void QDirDiffWidget::setupViews()
           //auto *dialog = new QFileDiffDialog(this);
           //dialog->setAttribute(Qt::WA_DeleteOnClose);
           //dialog->showDiff(leftPath() + '/' + rel, rightPath() + '/' + rel);
-          emit compareFileRequested(leftPath() + '/' + rel, rightPath() + '/' + rel);
+          emit compareFileRequested(QDir(model_->leftRoot()).filePath(rel), QDir(model_->rightRoot()).filePath(rel),
+            !node->existsOnLeft, !node->existsOnRight);
           });
 
         menu.exec(v->viewport()->mapToGlobal(pos));
@@ -456,7 +497,7 @@ void QDirDiffWidget::copySelection(bool leftToRight)
   for (const QModelIndex &idx : selectedIndexes) {
     // copy file or dir
     DirDiffNode *node = model_->nodeForIndex(proxy_->mapToSource(idx));
-    if (!node) continue;
+    if (!node || !(leftToRight ? node->existsOnLeft : node->existsOnRight)) continue;
     if (node->isDir)
       copyDir(idx, leftToRight);
     else
@@ -467,7 +508,7 @@ void QDirDiffWidget::copySelection(bool leftToRight)
 void QDirDiffWidget::deleteFile(const QModelIndex &idx, bool leftSide)
 {
   DirDiffNode *node = model_->nodeForIndex(proxy_->mapToSource(idx));
-  if (!node) return;
+  if (!node || !(leftSide ? node->existsOnLeft : node->existsOnRight)) return;
   if (QMessageBox::question(this, tr("Confirm Deletion"),
     tr("Are you sure you want to delete '%1' from the %2 side?")
     .arg(relPathForNode(node))
@@ -525,6 +566,16 @@ QString QDirDiffWidget::rightPath() const
   return headerRight_->currentPath();
 }
 
+QStringList QDirDiffWidget::exclusions()
+{
+  return QSettings().value(exclusionsSettingsKey).toStringList();
+}
+
+void QDirDiffWidget::setExclusions(const QStringList &patterns)
+{
+  QSettings().setValue(exclusionsSettingsKey, patterns);
+}
+
 void QDirDiffWidget::compareDirs()
 {
   const QString a = headerLeft_->currentPath().trimmed();
@@ -538,29 +589,57 @@ void QDirDiffWidget::compareDirs()
   emit statusMessage(tr("Comparing..."));
   model_->clear();
 
-  auto future = QtConcurrent::run([a, b]() -> std::vector<FileDiff> {
-    std::vector<FileDiff> results;
-    DiffOptions opts;
-    opts.useHash = true;
-    opts.ignoreHidden = false;
-    opts.includeIdentical = true;
-    diffDirectories(
-      a.toStdString(), b.toStdString(), opts,
-      [&](const FileDiff &fd) { results.push_back(fd); });
-    return results;
+  DiffOptions opts;
+  opts.includeIdentical = true;
+  for (const auto &pattern : exclusions())
+    opts.ignorePatterns.push_back(pattern.toStdString());
+
+  auto future = QtConcurrent::run([a, b, opts = std::move(opts)] {
+    ComparisonResult result{ a, b, {}, {} };
+    if (!QFileInfo(a).isDir()) {
+      result.error = tr("Cannot open the left directory \"%1\".").arg(a);
+      return result;
+    }
+    if (!QFileInfo(b).isDir()) {
+      result.error = tr("Cannot open the right directory \"%1\".").arg(b);
+      return result;
+    }
+
+    try {
+      diffDirectories(
+        QDir(a).filesystemPath(), QDir(b).filesystemPath(), opts,
+        [&](const FileDiff &fd) { result.files.push_back(fd); });
+    } catch (const std::filesystem::filesystem_error &error) {
+      const QString path = QFileInfo(error.path1()).filePath();
+      const QString reason = QString::fromLocal8Bit(error.code().message().c_str());
+      result.error = path.isEmpty() ? reason : tr("Cannot scan \"%1\" (%2).").arg(path, reason);
+    }
+    return result;
     });
   watcher_->setFuture(future);
 }
 
 void QDirDiffWidget::onDiffFinished()
 {
-  const auto results = watcher_->result();
-  model_->setDiffResults(results, leftPath(), rightPath());
+  if (!watcher_->future().isResultReadyAt(0)) {
+    emit statusMessage(tr("Comparison failed before producing a result."));
+    emit compareFinished();
+    return;
+  }
+
+  const auto result = watcher_->result();
+  if (!result.error.isEmpty()) {
+    emit statusMessage(tr("Comparison failed. %1").arg(result.error));
+    emit compareFinished();
+    return;
+  }
+
+  model_->setDiffResults(result.files, result.leftRoot, result.rightRoot);
   viewLeft_->header()->resizeSections(QHeaderView::ResizeToContents);
   viewRight_->header()->resizeSections(QHeaderView::ResizeToContents);
   expandAll(true);
   emit compareFinished();
-  emit statusMessage(tr("Done. %1 differences found.").arg(results.size()));
+  emit statusMessage(tr("Done. %1 differences found.").arg(result.files.size()));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -616,10 +695,11 @@ void QDirDiffModel::setDiffResults(const std::vector<FileDiff> &diffs, const QSt
   root_ = std::make_unique<DirDiffNode>();
   dirA_ = dirA;
   dirB_ = dirB;
+  root_->existsOnLeft = true;
+  root_->existsOnRight = true;
 
   for (const auto &fd : diffs) {
-    QString relPath = QString::fromStdString(fd.relativePath.string());
-    relPath.replace('\\', '/');
+    const QString relPath = QFileInfo(fd.relativePath).filePath();
     QStringList parts = relPath.split('/', Qt::SkipEmptyParts);
     if (parts.isEmpty()) continue;
 
@@ -627,25 +707,34 @@ void QDirDiffModel::setDiffResults(const std::vector<FileDiff> &diffs, const QSt
     for (int i = 0; i < parts.size(); ++i) {
       bool isLast = (i == parts.size() - 1);
       cur = cur->findOrAddChild(parts[i], !isLast);
+      cur->existsOnLeft |= fd.type != DiffType::Added;
+      cur->existsOnRight |= fd.type != DiffType::Removed;
       if (isLast) {
         cur->diffType = fd.type;
       }
     }
   }
 
-  propagateDiffTypes(root_.get());
+  for (const auto &child : root_->children)
+    updateDirectories(child.get(), child->name);
 
   endResetModel();
 }
 
-void QDirDiffModel::propagateDiffTypes(DirDiffNode *node)
+void QDirDiffModel::updateDirectories(DirDiffNode *node, const QString &relativePath)
 {
-  for (const auto &c : node->children)
-    propagateDiffTypes(c.get());
-
   if (node->isDir) {
-    node->diffType = node->properChildDiff();
+    // A folder can be present on a side that contributed no file results.
+    if (!node->existsOnLeft && node->parent->existsOnLeft)
+      node->existsOnLeft = QFileInfo(QDir(dirA_).filePath(relativePath)).isDir();
+    if (!node->existsOnRight && node->parent->existsOnRight)
+      node->existsOnRight = QFileInfo(QDir(dirB_).filePath(relativePath)).isDir();
   }
+
+  for (const auto &child : node->children)
+    updateDirectories(child.get(), relativePath + '/' + child->name);
+  if (node->isDir)
+    node->diffType = node->properChildDiff();
 }
 
 
@@ -697,20 +786,19 @@ QVariant QDirDiffModel::data(const QModelIndex &index, int role) const
   if (!index.isValid()) return {};
   const DirDiffNode *node = nodeForIndex(index);
   const auto col = static_cast<DiffColumn>(index.column());
+  const bool nameColumn = col == DiffColumn::LeftName || col == DiffColumn::RightName;
+  const bool exists = col == DiffColumn::LeftName ? node->existsOnLeft : node->existsOnRight;
 
   switch (role) {
-  case Qt::DisplayRole: {
-    QString text;
-    if (col == DiffColumn::DiffMark) {
-      text = markForDiff(node->diffType);
-    } else if (col == DiffColumn::LeftName) {
-      text = (node->diffType != DiffType::Added) ? node->name : QString();
-    } else if (col == DiffColumn::RightName) {
-      text = (node->diffType != DiffType::Removed) ? node->name : QString();
-    }
-    return text;
-  }
+  case Qt::DisplayRole:
+    if (col == DiffColumn::DiffMark)
+      return markForDiff(node->diffType);
+    if (nameColumn && exists)
+      return node->name;
+    return {};
   case Qt::ToolTipRole:
+    if (nameColumn && !exists)
+      return {};
     return node->name + " is " + diffType2Str(node->diffType);
   case Qt::TextAlignmentRole:
     if (col == DiffColumn::DiffMark)
@@ -721,20 +809,12 @@ QVariant QDirDiffModel::data(const QModelIndex &index, int role) const
   case IsDirRole:
     return node->isDir;
   case Qt::DecorationRole:
-    if (col == DiffColumn::LeftName || col == DiffColumn::RightName) {
+    if (nameColumn && exists) {
       if (iconFolder_.isNull()) {
         iconFolder_ = QApplication::style()->standardIcon(QStyle::SP_DirIcon);
         iconFile_ = QApplication::style()->standardIcon(QStyle::SP_FileIcon);
       }
-      if (node->isDir)
-        return iconFolder_;
-      else {
-        if (col == DiffColumn::LeftName && node->diffType != DiffType::Added) {
-          return iconFile_;
-        } else if (col == DiffColumn::RightName && node->diffType != DiffType::Removed) {
-          return iconFile_;
-        }
-      }
+      return node->isDir ? iconFolder_ : iconFile_;
     }
     return {};
   }

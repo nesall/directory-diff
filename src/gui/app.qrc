@@ -33,6 +33,8 @@
     <file alias="project-diagram">resources/icons/project-diagram.svg</file>
     <file alias="refresh">resources/icons/refresh.svg</file>
     <file alias="save">resources/icons/save.svg</file>
+    <file alias="save-left">resources/icons/save-left.svg</file>
+    <file alias="save-right">resources/icons/save-right.svg</file>
     <file alias="screwdriver">resources/icons/screwdriver.svg</file>
     <file alias="search">resources/icons/search.svg</file>
     <file alias="server">resources/icons/server.svg</file>
@@ -49,6 +51,7 @@
     <file alias="trash-alt">resources/icons/trash-alt.svg</file>
     <file alias="trashcan">resources/icons/trash-can.svg</file>
     <file alias="unlock-colored">resources/icons/unlock-colored.svg</file>
+    <file alias="undo">resources/icons/undo.svg</file>
     <file alias="unlock">resources/icons/unlock.svg</file>
     <file alias="xmark">resources/icons/xmark.svg</file>
     <file alias="circle-xmark">resources/icons/circle-xmark.svg</file>

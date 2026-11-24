@@ -1,4 +1,5 @@
 #include "directory-diff/dirdiff.h"
+#include <algorithm>
 #include <map>
 #include <fstream>
 #include <sstream>
@@ -13,48 +14,106 @@ namespace {
 
   bool isHiddenPath(const fs::path& p) {
     for (const auto& part : p) {
-      auto s = part.string();
-      if (!s.empty() && s[0] == '.') return true;
+      if (part.native().starts_with(static_cast<fs::path::value_type>('.'))) return true;
     }
     return false;
   }
 
-  bool matchesAnyPattern(const fs::path& relPath, const std::vector<std::string>& patterns) {
-    if (patterns.empty()) return false;
-    std::string full = relPath.string();
-    std::string filename = relPath.filename().string();
-
-    for (const auto& pat : patterns) {
-      // Convert simple wildcard pattern ('*') to regex. Escape other regex metacharacters.
-      std::string rx;
-      for (char c : pat) {
-        switch (c) {
-        case '*': rx += ".*"; break;
-        case '.': case '\\': case '+': case '?': case '^': case '$': case '(': case ')':
-        case '[': case ']': case '{': case '}': case '|': case '/': rx += '\\'; rx += c; break;
-        default: rx += c; break;
-        }
-      }
-      try {
-        if (pat.starts_with("*.") && !pat.ends_with("*")) {
-          if (2 < pat.length()) {
-            std::string ext = pat.substr(1); // extension with dot
-            if (ext.size() <= filename.size() && 0 == filename.compare(filename.size() - ext.size(), ext.size(), ext)) {
-              return true;
-            }
-          }
-        } else {
-          std::regex re(rx, std::regex::ECMAScript | std::regex::icase);
-          if (std::regex_search(full, re) || std::regex_search(filename, re)) {
-            return true;
-          }
-        }
-      } catch (...) {
-        // If regex fails, skip this pattern.
-        continue;
+  std::regex wildcardRegex(const std::string& pattern) {
+    std::string expression;
+    for (char c : pattern) {
+      switch (c) {
+      case '*': expression += ".*"; break;
+      case '.': case '\\': case '+': case '?': case '^': case '$': case '(': case ')':
+      case '[': case ']': case '{': case '}': case '|': expression += '\\'; expression += c; break;
+      default: expression += c; break;
       }
     }
-    return false;
+    return std::regex(expression, std::regex::ECMAScript | std::regex::icase);
+  }
+
+  class IgnoreMatcher {
+  public:
+    explicit IgnoreMatcher(const std::vector<std::string>& patterns) {
+      for (auto pattern : patterns) {
+#ifdef _WIN32
+        std::replace(pattern.begin(), pattern.end(), '\\', '/');
+#endif
+        const bool directory = pattern.ends_with('/');
+        if (directory) pattern.pop_back();
+        if (pattern.empty()) continue;
+
+        auto& rules = directory ? directories_ : files_;
+        if (!directory && pattern.size() > 2 && pattern.starts_with("*.") && pattern.find('*', 1) == std::string::npos) {
+          rules.push_back({ {}, pattern.substr(1), false });
+          continue;
+        }
+        try {
+          rules.push_back({ wildcardRegex(pattern), {}, pattern.find('/') != std::string::npos });
+        } catch (const std::regex_error&) {
+          continue;
+        }
+      }
+    }
+
+    bool hasDirectoryRules() const { return !directories_.empty(); }
+
+    bool matches(const fs::path& relativePath, bool directory) const {
+      const auto& rules = directory ? directories_ : files_;
+      if (rules.empty()) return false;
+      const auto utf8 = relativePath.generic_u8string();
+      const std::string full(utf8.begin(), utf8.end());
+      const std::string name = full.substr(full.find_last_of('/') + 1);
+
+      for (const auto& rule : rules) {
+        try {
+          if (!rule.suffix.empty()) {
+            if (name.ends_with(rule.suffix)) return true;
+          } else if (directory) {
+            if (std::regex_match(rule.relativePath ? full : name, rule.regex)) return true;
+          } else if (std::regex_search(full, rule.regex) || std::regex_search(name, rule.regex)) {
+            return true;
+          }
+        } catch (const std::regex_error&) {
+          continue;
+        }
+      }
+      return false;
+    }
+
+  private:
+    struct Rule {
+      std::regex regex;
+      std::string suffix;
+      bool relativePath;
+    };
+
+    std::vector<Rule> files_;
+    std::vector<Rule> directories_;
+  };
+
+  template<typename OnFile>
+  void scanFiles(const fs::path& root, const DiffOptions& options, const IgnoreMatcher& ignore, OnFile onFile) {
+    fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied), end;
+    for (; it != end; ++it) {
+      const auto& entry = *it;
+      if (!entry.is_regular_file()) {
+        if (ignore.hasDirectoryRules() && entry.is_directory() && ignore.matches(entry.path().lexically_relative(root), true))
+          it.disable_recursion_pending();
+        continue;
+      }
+
+      fs::path relativePath;
+      try {
+        relativePath = fs::relative(entry.path(), root);
+      } catch (const fs::filesystem_error&) {
+        continue;
+      }
+
+      if (options.ignoreHidden && isHiddenPath(relativePath)) continue;
+      if (ignore.matches(relativePath, false)) continue;
+      onFile(relativePath, entry.path());
+    }
   }
 
   struct FilePair {
@@ -78,55 +137,33 @@ size_t diffDirectories(
 {
   std::vector<FilePair> work;
   std::map<fs::path, DiffType> fileMap;
+  const IgnoreMatcher ignore(options.ignorePatterns);
 
   // Scan dirA
-  for (const auto& entry : fs::recursive_directory_iterator(dirA, fs::directory_options::skip_permission_denied)) {
-    if (!entry.is_regular_file()) continue;
-    fs::path relativePath;
-    try {
-      relativePath = fs::relative(entry.path(), dirA);
-    } catch (const fs::filesystem_error&) {
-      continue; // Skip files that can't be made relative
-    }
-
-    if (options.ignoreHidden && isHiddenPath(relativePath)) continue;
-    if (matchesAnyPattern(relativePath, options.ignorePatterns)) continue;
-
+  scanFiles(dirA, options, ignore, [&](const fs::path& relativePath, const fs::path&) {
     fileMap[relativePath] = DiffType::Removed; // Assume removed until we find it in dirB
-  }
+  });
 
   // Scan dirB
-  for (const auto& entry : fs::recursive_directory_iterator(dirB, fs::directory_options::skip_permission_denied)) {
-    if (!entry.is_regular_file()) continue;
-    fs::path relativePath;
-    try {
-      relativePath = fs::relative(entry.path(), dirB);
-    } catch (const fs::filesystem_error&) {
-      continue; // Skip files that can't be made relative
-    }
-
-    if (options.ignoreHidden && isHiddenPath(relativePath)) continue;
-    if (matchesAnyPattern(relativePath, options.ignorePatterns)) continue;
-
+  scanFiles(dirB, options, ignore, [&](const fs::path& relativePath, const fs::path& pathB) {
     auto it = fileMap.find(relativePath);
     if (it != fileMap.end()) {
       const auto pathA = dirA / relativePath;
-      const auto pathB = entry.path();
       try {
         bool sameSize = fs::file_size(pathA) == fs::file_size(pathB);
         if (!sameSize) {
           it->second = DiffType::Modified;
-          continue;
+          return;
         }
       } catch (const fs::filesystem_error&) {
         it->second = DiffType::Modified; // If we can't get size, treat as modified
-        continue;
+        return;
       }
       work.push_back({ relativePath, pathA, pathB });
     } else {
       fileMap[relativePath] = DiffType::Added; // New file in dirB
     }
-  }
+  });
 
   std::atomic<size_t> nofIdentical = 0;
 

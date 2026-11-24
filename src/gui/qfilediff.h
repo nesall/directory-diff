@@ -1,113 +1,89 @@
 #pragma once
 
-#include <QWidget>
-#include <QSplitter>
-#include <QTableWidget>
 #include <QFutureWatcher>
-#include <QLabel>
-#include <QComboBox>
-#include <QPushButton>
-#include <QMenu>
-#include <QTextCharFormat>
-#include <QSyntaxHighlighter>
-#include <QRegularExpression>
+#include <QWidget>
+#include <array>
+#include <optional>
 
 #include "directory-diff/filediff.h"
 
+class QAction;
+class QTableView;
 class QGenericPanelHeader;
+class QFileDiffModel;
 
-// -----------------------------------------------------------------------------
-// Syntax highlighter for table cells
-// -----------------------------------------------------------------------------
-class QCellSyntaxHighlighter : public QSyntaxHighlighter {
-  Q_OBJECT
-public:
-  explicit QCellSyntaxHighlighter(QTextDocument *parent = nullptr);
-  void setLanguage(const QString &filePath);
-
-protected:
-  void highlightBlock(const QString &text) override;
-
-private:
-  struct HighlightingRule {
-    QRegularExpression pattern;
-    QTextCharFormat format;
-  };
-
-  QVector<HighlightingRule> highlightingRules_;
-  QTextCharFormat keywordFormat_;
-  QTextCharFormat stringFormat_;
-  QTextCharFormat commentFormat_;
-  QTextCharFormat numberFormat_;
-
-  void initCppRules();
-};
-
-// -----------------------------------------------------------------------------
-// Main file diff widget - Table-based aligned view
-// -----------------------------------------------------------------------------
 class QFileDiffWidget : public QWidget {
   Q_OBJECT
 public:
-  explicit QFileDiffWidget(QWidget *parent = nullptr);
-  ~QFileDiffWidget();
+  explicit QFileDiffWidget(QWidget* parent = nullptr);
 
-  void setFiles(const QString &leftPath, const QString &rightPath);
+  void setFiles(const QString& leftPath, const QString& rightPath,
+    bool leftMissing = false, bool rightMissing = false);
   void compareFiles();
-  void copySelection(bool leftToRight);
-  void copyAll(bool leftToRight);
-  void goToNextDifference();
-  void goToPreviousDifference();
-  void zoomIn();
-  void zoomOut();
-  void setSyntaxHighlighting(bool enabled);
+  bool confirmDiscardChanges();
 
-  QString leftPath() const { return leftPath_; }
-  QString rightPath() const { return rightPath_; }
-  QString leftFile() const { return leftPath(); }
-  QString rightFile() const { return rightPath(); }
+  QString leftFile() const { return comparedPaths_[0]; }
+  QString rightFile() const { return comparedPaths_[1]; }
+  QString statusText() const { return statusText_; }
 
 signals:
-  void statusMessage(const QString &msg);
+  void statusMessage(const QString& message);
   void compareStarted();
   void compareFinished();
 
-private slots:
+private:
+  struct FileSide {
+    QString path;
+    TextFile document;
+    std::optional<std::string> savedBytes;
+    bool dirty = false;
+  };
+
+  struct Comparison {
+    std::optional<std::array<FileSide, 2>> sides;
+    DiffResult diff;
+    QString error;
+  };
+
+  struct BlockEdit {
+    int side;
+    int row;
+    size_t offset;
+    size_t inserted;
+    std::vector<Line> removed;
+    bool previousBom;
+  };
+
   void onDiffFinished();
-  void onCellDoubleClicked(int row, int column);
-  void onCurrentCellChanged(int currentRow, int currentColumn, int previousRow, int previousColumn);
+  void navigate(int direction);
+  void updateControls();
+  void reportCurrentChange();
+  void showStatus(const QString& message);
+  void selectChange(int row);
+  void copyText(int side);
+  void applyChange(int side);
+  void undoChange();
+  void replaceLines(int side, size_t offset, size_t count, std::vector<Line> replacement);
+  void updateDiff(int row);
+  void saveFile(int side);
+  void setBusy(bool busy);
 
-private:
-  void setupUI();
-  void setupContextMenu();
-  void buildAlignedTable(const DiffResult &diff, const QStringList &leftLines, const QStringList &rightLines);
-  void highlightRow(int row, EditType type);
-  void updateStatusBar();
-  void saveSettings();
-  void loadSettings();
-  int findNextDiff(int startRow);
-  int findPrevDiff(int startRow);
+  QGenericPanelHeader* headers_[2]{};
+  QTableView* view_;
+  QFileDiffModel* model_;
+  QAction* previous_;
+  QAction* next_;
+  QAction* apply_[2]{};
+  QAction* undo_;
+  QAction* save_[2]{};
+  QFutureWatcher<Comparison>* watcher_;
 
-  QList<int> getSelectedRows() const;
-
-private:
-  QGenericPanelHeader *headerLeft_ = nullptr;
-  QGenericPanelHeader *headerRight_ = nullptr;
-  QTableWidget *tableWidget_;
-  QWidget *toolbar_;
-  QLabel *statusLabel_;
-  QPushButton *nextDiffBtn_;
-  QPushButton *prevDiffBtn_;
-  QComboBox *zoomCombo_;
-  QAction *syntaxHighlightAction_;
-
-  QString leftPath_;
-  QString rightPath_;
-
-  QFutureWatcher<DiffResult> *watcher_;
-  QVector<int> diffRows_;  // Rows that contain differences
-
-  // Settings
-  int fontSize_;
-  bool syntaxHighlighting_;
+  std::array<QString, 2> comparedPaths_;
+  std::array<QString, 2> knownMissingPaths_;
+  std::array<FileSide, 2> sides_;
+  std::vector<BlockEdit> edits_;
+  QString statusText_;
+  int preferredRow_ = 0;
+  bool busy_ = false;
+  bool hasResult_ = false;
 };

@@ -13,12 +13,17 @@ class QMainWindowDiff : public QMainWindow {
 public:
   explicit QMainWindowDiff(QWidget* parent = nullptr);
 
+protected:
+  void closeEvent(QCloseEvent *event) override;
+
 private slots:
-  void compareFileRequested(const QString &leftFile, const QString &rightFile);
+  void compareFileRequested(const QString &leftFile, const QString &rightFile,
+    bool leftMissing = false, bool rightMissing = false);
 
 private:
   void createToolBar();
   void createCentralWidgets();
+  void showSettings();
 
   QTabWidget* tabWidget()       const;
   QDirDiffWidget* currentDirDiff()  const;

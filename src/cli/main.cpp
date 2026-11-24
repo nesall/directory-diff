@@ -3,6 +3,7 @@
 #include <directory-diff/3rdparty/CLI11.hpp>
 #include <directory-diff/3rdparty/fmt/format.h>
 #include <directory-diff/3rdparty/fmt/ranges.h>
+#include <directory-diff/3rdparty/fmt/std.h>
 #include <utils_log/logger.hpp>
 #include "directory-diff/dirdiff.h"
 
@@ -35,12 +36,13 @@ int main(int argc, char* argv[]) {
   dir_diff_cmd->add_option("dir_a", dir_a, "First directory path")->required();
   dir_diff_cmd->add_option("dir_b", dir_b, "Second directory path")->required();
   std::vector<std::string> ignoreList;
-  dir_diff_cmd->add_option("--ignore", ignoreList, "Ignore patterns (semicolon-separated)")->delimiter(';');
+  dir_diff_cmd->add_option("--ignore", ignoreList, "Ignore patterns (semicolon-separated, trailing / for folders)")->delimiter(';');
 
   try {
-    app.parse(argc, argv);
+    app.parse(argc, app.ensure_utf8(argv));
     if (*file_diff_cmd) {
-      const fs::path fa = file_a, fb = file_b;
+      const auto fa = CLI::to_path(file_a);
+      const auto fb = CLI::to_path(file_b);
       if (!fs::exists(fa) || !fs::exists(fb)) {
         fmt::print(stderr, "One or both files do not exist.\n");
         return 1;
@@ -71,7 +73,7 @@ int main(int argc, char* argv[]) {
       options.useHash = true;
       options.ignorePatterns = ignoreList;
       options.includeIdentical = false;
-      size_t nofIdentical = diffDirectories(dir_a, dir_b, options, [&ansiColors](const FileDiff& diff) {
+      size_t nofIdentical = diffDirectories(CLI::to_path(dir_a), CLI::to_path(dir_b), options, [&ansiColors](const FileDiff& diff) {
         char symbol = '?';
         switch (diff.type) {
         case DiffType::Added: symbol = '+'; break;
@@ -80,7 +82,7 @@ int main(int argc, char* argv[]) {
         case DiffType::Identical: symbol = '='; break; // Should not be reported
         }
         std::string color = "\033[" + ansiColors[symbol] + "m";
-        std::cout << color << '[' << symbol << "] " << "\033[0m" << diff.relativePath.string() << std::endl;
+        fmt::print("{}[{}] \033[0m{}\n", color, symbol, diff.relativePath);
         });
       std::cout << "Comparison complete." << std::endl;
       std::cout << "Nof identical files: " << nofIdentical << std::endl;
@@ -89,6 +91,9 @@ int main(int argc, char* argv[]) {
     }
   } catch (const CLI::ParseError& e) {
     return app.exit(e);
+  } catch (const std::exception& e) {
+    fmt::print(stderr, "{}\n", e.what());
+    return 1;
   }
 
   return 0;

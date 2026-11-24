@@ -2,6 +2,8 @@
 
 #include <filesystem>
 #include <functional>
+#include <string>
+#include <vector>
 
 
 enum class DiffType { Added, Removed, Modified, Identical };
@@ -26,10 +28,17 @@ DiffType diffFile(
 
 
 enum class EditType { Equal, Insert, Delete, Replace };
+enum class LineEnding { None, LF, CRLF, CR };
 
 struct Line {
   int number;        // 1-based
   std::string text;  // without trailing newline
+  LineEnding ending = LineEnding::LF;
+};
+
+struct TextFile {
+  std::vector<Line> lines;
+  bool utf8Bom = false;
 };
 
 struct Hunk {
@@ -40,6 +49,8 @@ struct Hunk {
 
 using DiffResult = std::vector<Hunk>;
 
+TextFile loadTextFile(const std::filesystem::path& path);
+std::string textFileBytes(const TextFile& file);
 std::vector<Line> loadLines(const std::filesystem::path& p);
 DiffResult myersDiff(const std::vector<Line>& a, const std::vector<Line>& b);
 void printUnifiedDiff(

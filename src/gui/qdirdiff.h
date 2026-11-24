@@ -23,6 +23,8 @@ public:
   explicit QDirDiffWidget(QWidget* parent = nullptr);
 
   void compareDirs();
+  static QStringList exclusions();
+  static void setExclusions(const QStringList& patterns);
   QDirDiffProxyModel *proxyModel() const { return proxy_; }
   QString leftPath()  const;
   QString rightPath() const;
@@ -31,7 +33,7 @@ Q_SIGNALS:
   void statusMessage(const QString& msg);
   void compareStarted();
   void compareFinished();
-  void compareFileRequested(const QString &leftFile, const QString &rightFile);
+  void compareFileRequested(const QString &leftFile, const QString &rightFile, bool leftMissing, bool rightMissing);
 
 private Q_SLOTS:
   void onDiffFinished();
@@ -47,6 +49,13 @@ private:
   void expandAll(bool expand);
 
 private:
+  struct ComparisonResult {
+    QString leftRoot;
+    QString rightRoot;
+    std::vector<FileDiff> files;
+    QString error;
+  };
+
   QGenericPanelHeader * headerLeft_ = nullptr;
   QGenericPanelHeader * headerRight_ = nullptr;
   QTreeView* viewLeft_ = nullptr;
@@ -56,7 +65,7 @@ private:
   QDirDiffProxyModel *proxy_ = nullptr;
 
   // async worker
-  QFutureWatcher<std::vector<FileDiff>>* watcher_ = nullptr;
+  QFutureWatcher<ComparisonResult>* watcher_ = nullptr;
   bool syncingExpansion_ = false;
   bool syncingSelection_ = false;
 };
@@ -93,6 +102,8 @@ struct DirDiffNode {
   QString name;
   DiffType diffType = DiffType::Identical;
   bool isDir = false;
+  bool existsOnLeft = false;
+  bool existsOnRight = false;
 
   DirDiffNode* parent = nullptr;
   std::vector<std::unique_ptr<DirDiffNode>> children;
@@ -128,6 +139,8 @@ public:
 
   // Rebuild the whole tree from a diff result.
   void setDiffResults(const std::vector<FileDiff>& diffs, const QString& dirA, const QString& dirB);
+  QString leftRoot() const { return dirA_; }
+  QString rightRoot() const { return dirB_; }
 
   void clear();
 
@@ -142,7 +155,7 @@ public:
   DirDiffNode* nodeForIndex(const QModelIndex& idx) const;
 
 private:
-  void propagateDiffTypes(DirDiffNode* node);
+  void updateDirectories(DirDiffNode* node, const QString& relativePath);
 
   std::unique_ptr<DirDiffNode> root_;
   QString dirA_;

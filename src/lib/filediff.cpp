@@ -1,7 +1,15 @@
 #include "directory-diff/filediff.h"
+#include <algorithm>
+#include <array>
 #include <fstream>
+#include <iterator>
+#include <optional>
+#include <span>
+#include <stdexcept>
 #include <sstream>
 #include <directory-diff/3rdparty/fmt/core.h>
+#include <directory-diff/3rdparty/fmt/std.h>
+#include <directory-diff/3rdparty/utf8.h>
 
 #define XXH_STATIC_LINKING_ONLY /* access advanced declarations */
 #define XXH_IMPLEMENTATION      /* access definitions */
@@ -96,128 +104,188 @@ DiffType diffFile(const fs::path& a, const fs::path& b, const DiffOptions& optio
 }
 
 
-std::vector<Line> loadLines(const fs::path& p) {
-  std::ifstream ifs(p);
-  if (!ifs) return {};
-
-  std::vector<Line> lines;
-  std::string raw;
-  int n = 1;
-  while (std::getline(ifs, raw)) {
-    if (!raw.empty() && raw.back() == '\r')
-      raw.pop_back();
-    lines.push_back({ n++, std::move(raw) });
+TextFile loadTextFile(const fs::path& path)
+{
+  std::error_code error;
+  if (!fs::is_regular_file(path, error)) {
+    throw fs::filesystem_error("Cannot open text file", path,
+      error ? error : std::make_error_code(std::errc::invalid_argument));
   }
-  return lines;
+
+  std::ifstream input(path, std::ios::binary);
+  if (!input)
+    throw fs::filesystem_error("Cannot open text file", path, std::make_error_code(std::errc::io_error));
+
+  std::string bytes;
+  std::array<char, 64 * 1024> buffer;
+  while (input.read(buffer.data(), buffer.size()) || input.gcount() > 0)
+    bytes.append(buffer.data(), static_cast<size_t>(input.gcount()));
+  if (input.bad() || !input.eof())
+    throw fs::filesystem_error("Cannot read text file", path, std::make_error_code(std::errc::io_error));
+  if (bytes.find('\0') != std::string::npos || !utf8::is_valid(bytes.begin(), bytes.end()))
+    throw std::runtime_error("Expected a UTF-8 text file.");
+
+  TextFile file;
+  file.utf8Bom = bytes.starts_with("\xEF\xBB\xBF");
+  size_t start = file.utf8Bom ? 3 : 0;
+  for (int number = 1; start < bytes.size(); ++number) {
+    const auto end = bytes.find_first_of("\r\n", start);
+    if (end == std::string::npos) {
+      file.lines.push_back({ number, bytes.substr(start), LineEnding::None });
+      break;
+    }
+    const bool crlf = bytes[end] == '\r' && end + 1 < bytes.size() && bytes[end + 1] == '\n';
+    const LineEnding ending = crlf ? LineEnding::CRLF : bytes[end] == '\r' ? LineEnding::CR : LineEnding::LF;
+    file.lines.push_back({ number, bytes.substr(start, end - start), ending });
+    start = end + (crlf ? 2 : 1);
+  }
+  return file;
 }
 
-DiffResult myersDiff(const std::vector<Line>& a, const std::vector<Line>& b) {
-  const int N = (int)a.size();
-  const int M = (int)b.size();
-  const int MAX = N + M;
+std::string textFileBytes(const TextFile& file)
+{
+  std::string bytes = file.utf8Bom ? "\xEF\xBB\xBF" : "";
+  for (auto it = file.lines.begin(); it != file.lines.end(); ++it) {
+    const auto& line = *it;
+    bytes += line.text;
+    switch (line.ending) {
+    case LineEnding::None: break;
+    case LineEnding::LF: bytes += '\n'; break;
+    case LineEnding::CRLF: bytes += "\r\n"; break;
+    case LineEnding::CR:
+      bytes += '\r';
+      // An inserted empty LF line must stay separate from the preceding CR.
+      if (const auto next = std::next(it); next != file.lines.end() && next->text.empty() && next->ending == LineEnding::LF)
+        bytes += '\n';
+      break;
+    }
+  }
+  return bytes;
+}
 
-  if (MAX == 0) return {};
+std::vector<Line> loadLines(const fs::path& path)
+{
+  return loadTextFile(path).lines;
+}
 
-  // v[k] = furthest x reached on diagonal k
-  // offset by MAX so we can index negatives
-  std::vector<int> v(2 * MAX + 1, 0);
+namespace {
+  bool sameLine(const Line& a, const Line& b)
+  {
+    return a.text == b.text && (a.ending == LineEnding::None) == (b.ending == LineEnding::None);
+  }
 
-  // trace[d] = snapshot of v after d edits
-  std::vector<std::vector<int>> trace;
-  trace.reserve(MAX + 1);
+  // The frontier at depth d stores diagonals -d, -d+2, ..., d.
+  bool cameFromInsert(const std::vector<int>& previous, int depth, int diagonal)
+  {
+    return diagonal == -depth ||
+      (diagonal != depth && previous[(diagonal + depth - 2) / 2] < previous[(diagonal + depth) / 2]);
+  }
 
-  // Forward pass — record trace
-  for (int d = 0; d <= MAX; ++d) {
-    trace.push_back(v);
-    for (int k = -d; k <= d; k += 2) {
-      int x;
-      if (k == -d || (k != d && v[k - 1 + MAX] < v[k + 1 + MAX]))
-        x = v[k + 1 + MAX];      // move down (insert from b)
-      else
-        x = v[k - 1 + MAX] + 1;  // move right (delete from a)
-
-      int y = x - k;
-      while (x < N && y < M && a[x].text == b[y].text) {
-        ++x; ++y;               // snake (equal)
+  std::vector<EditType> backtrack(const std::vector<std::vector<int>>& trace, int x, int y)
+  {
+    std::vector<EditType> edits;
+    for (int depth = static_cast<int>(trace.size()) - 1; depth > 0; --depth) {
+      const auto& previous = trace[depth - 1];
+      const int diagonal = x - y;
+      const bool inserted = cameFromInsert(previous, depth, diagonal);
+      const int previousDiagonal = diagonal + (inserted ? 1 : -1);
+      const int previousX = previous[(previousDiagonal + depth - 1) / 2];
+      const int previousY = previousX - previousDiagonal;
+      while (x > previousX && y > previousY) {
+        edits.push_back(EditType::Equal);
+        --x;
+        --y;
       }
-      v[k + MAX] = x;
-      if (x >= N && y >= M) goto done;
+      edits.push_back(inserted ? EditType::Insert : EditType::Delete);
+      x = previousX;
+      y = previousY;
     }
+    edits.insert(edits.end(), x, EditType::Equal);
+    std::reverse(edits.begin(), edits.end());
+    return edits;
   }
-done:;
 
-  // Backtrack through trace to recover edit path
-  struct Move { int x, y, px, py; };
-  std::vector<Move> path;
-
-  int x = N, y = M;
-  for (int d = (int)trace.size() - 1; d > 0 && (x > 0 || y > 0); --d) {
-    const auto& vv = trace[d];
-    int k = x - y;
-
-    int pk;
-    if (k == -d || (k != d && vv[k - 1 + MAX] < vv[k + 1 + MAX]))
-      pk = k + 1;  // came from down
-    else
-      pk = k - 1;  // came from right
-
-    int px = vv[pk + MAX];
-    int py = px - pk;
-
-    // walk back over the snake
-    while (x > px && y > py) {
-      path.push_back({ x, y, x - 1, y - 1 });
-      --x; --y;
+  std::optional<std::vector<EditType>> shortestEditPath(std::span<const Line> a, std::span<const Line> b)
+  {
+    // A large, dissimilar region can be displayed as a single change when the trace reaches this limit.
+    constexpr size_t traceBudget = 4 * 1024 * 1024;
+    size_t traceSize = 0;
+    std::vector<std::vector<int>> trace;
+    const int leftSize = static_cast<int>(a.size());
+    const int rightSize = static_cast<int>(b.size());
+    for (int depth = 0; depth <= leftSize + rightSize; ++depth) {
+      traceSize += static_cast<size_t>(depth) + 1;
+      if (traceSize > traceBudget) return std::nullopt;
+      auto& frontier = trace.emplace_back(static_cast<size_t>(depth) + 1, 0);
+      for (int diagonal = -depth; diagonal <= depth; diagonal += 2) {
+        int x = 0;
+        if (depth > 0) {
+          const auto& previous = trace[depth - 1];
+          x = cameFromInsert(previous, depth, diagonal)
+            ? previous[(diagonal + depth) / 2]
+            : previous[(diagonal + depth - 2) / 2] + 1;
+        }
+        int y = x - diagonal;
+        while (x < leftSize && y < rightSize && sameLine(a[x], b[y])) {
+          ++x;
+          ++y;
+        }
+        frontier[(diagonal + depth) / 2] = x;
+        if (x >= leftSize && y >= rightSize)
+          return backtrack(trace, leftSize, rightSize);
+      }
     }
-    // the actual edit move
-    if (d > 0) path.push_back({ x, y, px, py });
-    x = px; y = py;
+    return std::nullopt;
   }
-  std::reverse(path.begin(), path.end());
+}
 
-  // Build raw hunks (Equal/Insert/Delete only)
-  std::vector<Hunk> raw;
-  auto flush = [&](Hunk& h) {
-    if (!h.linesA.empty() || !h.linesB.empty())
-      raw.push_back(std::move(h));
-    };
-
-  Hunk cur;
-  cur.type = EditType::Equal;
-
-  for (const auto& m : path) {
-    bool isEqual = (m.x - m.px == 1) && (m.y - m.py == 1);
-    bool isDelete = (m.x - m.px == 1) && (m.y == m.py);
-    // else insert
-
-    EditType et = isEqual ? EditType::Equal
-      : isDelete ? EditType::Delete
-      : EditType::Insert;
-
-    if (et != cur.type) { flush(cur); cur = Hunk{}; cur.type = et; }
-
-    if (isEqual || isDelete) cur.linesA.push_back(a[m.px]);
-    if (isEqual || !isDelete) cur.linesB.push_back(b[m.py]);
+DiffResult myersDiff(const std::vector<Line>& a, const std::vector<Line>& b)
+{
+  const int leftSize = static_cast<int>(a.size());
+  const int rightSize = static_cast<int>(b.size());
+  int prefix = 0;
+  while (prefix < leftSize && prefix < rightSize && sameLine(a[prefix], b[prefix]))
+    ++prefix;
+  int leftEnd = leftSize;
+  int rightEnd = rightSize;
+  while (leftEnd > prefix && rightEnd > prefix && sameLine(a[leftEnd - 1], b[rightEnd - 1])) {
+    --leftEnd;
+    --rightEnd;
   }
-  flush(cur);
 
-  // Merge consecutive Delete+Insert into Replace
   DiffResult result;
-  for (size_t i = 0; i < raw.size(); ++i) {
-    if (raw[i].type == EditType::Delete &&
-      i + 1 < raw.size() &&
-      raw[i + 1].type == EditType::Insert) {
-      result.push_back({
-          EditType::Replace,
-          std::move(raw[i].linesA),
-          std::move(raw[i + 1].linesB)
-        });
-      ++i;
-    } else {
-      result.push_back(std::move(raw[i]));
-    }
-  }
+  auto append = [&](bool equal, int leftBegin, int leftLimit, int rightBegin, int rightLimit) {
+    if (leftBegin == leftLimit && rightBegin == rightLimit) return;
+    const EditType type = equal ? EditType::Equal : leftBegin == leftLimit ? EditType::Insert
+      : rightBegin == rightLimit ? EditType::Delete : EditType::Replace;
+    result.push_back({ type,
+      { a.begin() + leftBegin, a.begin() + leftLimit },
+      { b.begin() + rightBegin, b.begin() + rightLimit } });
+  };
+  append(true, 0, prefix, 0, prefix);
 
+  const auto leftMiddle = std::span(a).subspan(prefix, leftEnd - prefix);
+  const auto rightMiddle = std::span(b).subspan(prefix, rightEnd - prefix);
+  const auto edits = leftMiddle.empty() || rightMiddle.empty()
+    ? std::nullopt : shortestEditPath(leftMiddle, rightMiddle);
+  if (edits) {
+    int left = prefix;
+    int right = prefix;
+    for (auto it = edits->begin(); it != edits->end();) {
+      const bool equal = *it == EditType::Equal;
+      const int leftBegin = left;
+      const int rightBegin = right;
+      do {
+        if (*it != EditType::Insert) ++left;
+        if (*it != EditType::Delete) ++right;
+        ++it;
+      } while (it != edits->end() && (*it == EditType::Equal) == equal);
+      append(equal, leftBegin, left, rightBegin, right);
+    }
+  } else {
+    append(false, prefix, leftEnd, prefix, rightEnd);
+  }
+  append(true, leftEnd, leftSize, rightEnd, rightSize);
   return result;
 }
 
@@ -226,8 +294,7 @@ void printUnifiedDiff(const DiffResult& diff, const fs::path& pathA, const fs::p
   // Flatten diff into a sequence of tagged lines for easy windowing
   struct FlatLine {
     EditType type;
-    Line     line;   // linesA for Delete/Replace/Equal, linesB for Insert/Replace
-    bool     isB;    // true = came from B side
+    const Line& line;
   };
 
   std::vector<FlatLine> flat;
@@ -235,28 +302,28 @@ void printUnifiedDiff(const DiffResult& diff, const fs::path& pathA, const fs::p
     switch (h.type) {
     case EditType::Equal:
       for (const auto& l : h.linesA)
-        flat.push_back({ EditType::Equal, l, false });
+        flat.push_back({ EditType::Equal, l });
       break;
     case EditType::Delete:
       for (const auto& l : h.linesA)
-        flat.push_back({ EditType::Delete, l, false });
+        flat.push_back({ EditType::Delete, l });
       break;
     case EditType::Insert:
       for (const auto& l : h.linesB)
-        flat.push_back({ EditType::Insert, l, true });
+        flat.push_back({ EditType::Insert, l });
       break;
     case EditType::Replace:
       for (const auto& l : h.linesA)
-        flat.push_back({ EditType::Delete, l, false });
+        flat.push_back({ EditType::Delete, l });
       for (const auto& l : h.linesB)
-        flat.push_back({ EditType::Insert, l, true });
+        flat.push_back({ EditType::Insert, l });
       break;
     }
   }
 
   // Header
-  fmt::print("--- {}\n", pathA.string());
-  fmt::print("+++ {}\n", pathB.string());
+  fmt::print("--- {}\n", pathA);
+  fmt::print("+++ {}\n", pathB);
 
   const int n = (int)flat.size();
 
@@ -270,8 +337,6 @@ void printUnifiedDiff(const DiffResult& diff, const fs::path& pathA, const fs::p
 
   // Group changed lines into windows with context
   std::vector<std::pair<int, int>> windows; // [start, end) in flat[]
-  //int wStart = std::max(0, changed.front() - context);
-  //int wEnd = std::min(n, changed.back() + context + 1);
 
   // Split into separate hunks where gap between changes > 2*context
   int prev = changed[0];
@@ -285,25 +350,26 @@ void printUnifiedDiff(const DiffResult& diff, const fs::path& pathA, const fs::p
   }
   windows.push_back({ hStart, std::min(n, prev + context + 1) });
 
-  // Render each hunk
-  for (const auto& [start, end] : windows) {
-    // Compute @@ line numbers
-    int lineA = 1, countA = 0, lineB = 1, countB = 0;
-    bool firstA = true, firstB = true;
-    for (int i = start; i < end; ++i) {
-      const auto& fl = flat[i];
-      if (fl.type != EditType::Insert) {
-        if (firstA) { lineA = fl.line.number; firstA = false; }
-        ++countA;
-      }
-      if (fl.type != EditType::Delete) {
-        if (firstB) { lineB = fl.line.number; firstB = false; }
-        ++countB;
-      }
+  int cursor = 0;
+  int leftLines = 0;
+  int rightLines = 0;
+  auto advanceTo = [&](int end) {
+    while (cursor < end) {
+      const auto type = flat[cursor++].type;
+      if (type != EditType::Insert) ++leftLines;
+      if (type != EditType::Delete) ++rightLines;
     }
+  };
+  for (const auto& [start, end] : windows) {
+    advanceTo(start);
+    const int leftBefore = leftLines;
+    const int rightBefore = rightLines;
+    advanceTo(end);
+    const int countA = leftLines - leftBefore;
+    const int countB = rightLines - rightBefore;
 
     fmt::print("\033[36m@@ -{},{} +{},{} @@\033[0m\n",
-      lineA, countA, lineB, countB);
+      leftBefore + (countA != 0), countA, rightBefore + (countB != 0), countB);
 
     for (int i = start; i < end; ++i) {
       const auto& fl = flat[i];
@@ -319,6 +385,8 @@ void printUnifiedDiff(const DiffResult& diff, const fs::path& pathA, const fs::p
         break;
       default: break;
       }
+      if (fl.line.ending == LineEnding::None)
+        fmt::print("\\ No newline at end of file\n");
     }
   }
 }
