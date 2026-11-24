@@ -6,6 +6,7 @@
 #include <QTreeView>
 #include <QSplitter>
 #include <QFutureWatcher>
+#include <QHash>
 #include <QSortFilterProxyModel>
 
 #include <memory>
@@ -22,6 +23,7 @@ class QDirDiffModel;
 class QDirDiffProxyModel;
 struct QDirDiffJobState;
 struct DirDiffNode;
+using CopiedEntries = QHash<const DirDiffNode*, std::optional<FileFingerprint>>;
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -38,7 +40,7 @@ public:
   QString leftPath()  const;
   QString rightPath() const;
   QString statusText() const { return statusText_; }
-  bool hasComparisonStats() const { return comparisonStats_.has_value() && !job_; }
+  bool hasComparisonStats() const { return scanCount_.has_value() && !job_; }
   void showComparisonStats();
 
 Q_SIGNALS:
@@ -54,14 +56,16 @@ private Q_SLOTS:
 
 private:
   enum class Job { Compare, Copy, Delete };
+  struct OperationResult;
 
   void setupViews();
   void syncExpansion(QTreeView* source, QTreeView* target, const QModelIndex& idx, bool expanded);
   QString relPathForNode(const DirDiffNode* node, bool left) const;
+  void compareFile(const QModelIndex& index);
   void copySelection(const QModelIndexList& selection, bool leftToRight);
   void deleteEntry(const QModelIndex& idx, bool leftSide);
   QModelIndexList operationSelection(QTreeView* source) const;
-  void startFileOperation(Job kind, std::function<QString(QDirDiffJobState&)> operation);
+  void startFileOperation(Job kind, std::function<OperationResult(QDirDiffJobState&)> operation);
   void startComparison(const QString& leftRoot, const QString& rightRoot, const QString& operation = {});
   void beginJob(Job kind);
   void endJob();
@@ -82,7 +86,7 @@ private:
     size_t rightOnly = 0;
     size_t typeConflicts = 0;
 
-    void record(const FileDiff& entry);
+    void record(const DirDiffNode& entry);
     size_t differences() const { return modifiedFiles + leftOnly + rightOnly + typeConflicts; }
   };
 
@@ -91,12 +95,14 @@ private:
     QString rightRoot;
     std::vector<FileDiff> files;
     QString error;
-    ComparisonStats stats;
+    size_t scanned = 0;
   };
 
   struct OperationResult {
     QString summary;
     bool refresh = true;
+    CopiedEntries copied;
+    bool leftToRight = true;
   };
 
   QGenericPanelHeader * headerLeft_ = nullptr;
@@ -118,7 +124,7 @@ private:
   QTimer* progressTimer_ = nullptr;
   QString operationSummary_;
   QString statusText_;
-  std::optional<ComparisonStats> comparisonStats_;
+  std::optional<size_t> scanCount_;
   bool syncingExpansion_ = false;
   bool syncingSelection_ = false;
 };
@@ -159,6 +165,7 @@ struct DirDiffNode {
   DiffEntryKind rightKind = DiffEntryKind::Missing;
   std::optional<FileFingerprint> leftFingerprint;
   std::optional<FileFingerprint> rightFingerprint;
+  bool resolvedByCopy = false;
 
   DirDiffNode* parent = nullptr;
   std::vector<std::unique_ptr<DirDiffNode>> children;
@@ -187,6 +194,7 @@ enum DirDiffRole {
   DiffTypeRole = Qt::UserRole + 1,   // DiffType as int
   IsDirRole = Qt::UserRole + 2,
   TypeConflictRole = Qt::UserRole + 3,
+  ResolvedByCopyRole = Qt::UserRole + 4,
 };
 
 
@@ -199,6 +207,7 @@ public:
 
   // Rebuild the whole tree from a diff result.
   void setDiffResults(const std::vector<FileDiff>& diffs, const QString& dirA, const QString& dirB);
+  void applyCopies(const CopiedEntries& copied, bool leftToRight);
   QString leftRoot() const { return dirA_; }
   QString rightRoot() const { return dirB_; }
 
@@ -231,6 +240,7 @@ class QDirDiffProxyModel : public QSortFilterProxyModel {
   Q_OBJECT
 public:
   explicit QDirDiffProxyModel(QObject *parent = nullptr);
+  void refreshFilter() { invalidateFilter(); }
 
 public slots:
   void setShowIdentical(bool show);

@@ -21,6 +21,7 @@
     <file alias="file">resources/icons/file.svg</file>
     <file alias="grid">resources/icons/grid.svg</file>
     <file alias="industry">resources/icons/industry.svg</file>
+    <file alias="info.svg">resources/icons/info.svg</file>
     <file alias="lightbulb">resources/icons/lightbulb.svg</file>
     <file alias="list">resources/icons/list.svg</file>
     <file alias="lock-colored">resources/icons/lock-colored.svg</file>

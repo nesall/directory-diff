@@ -27,7 +27,7 @@ The CLI and GUI share the UTF-8 text loader and Myers diff. Preserve both origin
 
 ## Directory file operations
 
-Resolve operations against the roots of the displayed comparison and validate the selected entry on disk. Copy each file using atomic replacement. Give the worker a read-only snapshot of the selected rows and refresh once after the batch, including on cancellation. A canceled copy discards any staged file and preserves committed changes. A canceled delete preserves deletions already made. Report partial failures and keep the deletion confirmation tied to the resolved path. A recursive operation skips symbolic links and junctions.
+Resolve operations against the roots of the displayed comparison and validate the selected entry on disk. Copy each file using atomic replacement. Give the worker a read-only snapshot of the selected rows. On successful copies between separate roots, update the affected entries and their fingerprints in the model and hide resolved rows in the proxy. Refresh after deletes, incomplete copies, and copies between overlapping roots. A canceled copy discards any staged file and preserves committed changes. A canceled delete preserves deletions already made. Report partial failures and keep the deletion confirmation tied to the resolved path. A recursive operation skips symbolic links and junctions.
 
 ## Verification
 

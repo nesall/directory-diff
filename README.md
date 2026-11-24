@@ -30,7 +30,7 @@ $env:PATH = "$env:QT6_DIR\bin;$env:PATH"
 
 1. In the **Directory Diff** tab, enter or browse for the left and right folders.
 2. Click **Compare**. The tab shows progress as it scans entries and compares file contents. Click **Cancel** to stop and discard the comparison. Use the toolbar filters to choose which result categories to show.
-3. For a file present on both sides, right-click its row and choose **Compare files** to open the text diff tab.
+3. Double-click a file or choose **Compare files** from its context menu to open the text diff tab.
 
 After a comparison, matching folders directly under the compared roots start collapsed. Other branches open automatically. Expand a folder in either pane to open it in both.
 
@@ -38,7 +38,9 @@ After a comparison, matching folders directly under the compared roots start col
 
 Open **Settings** to save comparison exclusions. Enter one pattern per line, such as `*.tmp` for temporary files, `build/` for folders named `build` at any depth, or `third_party/cache/` for that folder relative to each comparison root. Saved rules apply to both panes on the next comparison and persist across sessions.
 
-In the directory view, use the context menu to copy selected entries between the compared roots or permanently delete an entry from one side. Copy and delete run in the background. The tab shows the current path and completed entry count. **Cancel** stops the remaining work and keeps completed changes. The status bar reports skipped entries, and the comparison refreshes after the operation.
+In the directory view, use the context menu to copy selected entries between the compared roots or permanently delete an entry from one side. Copy and delete run in the background. The tab shows the current path and completed entry count. **Cancel** stops the remaining work and keeps completed changes. The status bar reports skipped entries.
+
+Successful copies between separate roots update the affected rows and hide the resolved entries. **Compare** runs a fresh scan. Deletes, incomplete copies, and copies between overlapping roots refresh the comparison automatically.
 
 Use **Copy Name**, **Copy Full Path**, or **Copy Relative Path** to put the clicked entry’s name or path on the clipboard. Paths follow the side you clicked.
 

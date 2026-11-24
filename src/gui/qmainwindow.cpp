@@ -42,7 +42,7 @@ void QMainWindowDiff::createToolBar()
 
   actCompare_ = mainToolBar_->addAction(tr("Compare"));
   actCompare_->setIcon(QIcon::fromTheme(":/refresh"));
-  actStats_ = mainToolBar_->addAction(QIcon(":/line-chart"), tr("Stats"), this, [this] {
+  actStats_ = mainToolBar_->addAction(QIcon(":/info.svg"), tr("Stats"), this, [this] {
     if (auto *directory = currentDirDiff()) directory->showComparisonStats();
   });
   actStats_->setToolTip(tr("Show directory comparison statistics"));

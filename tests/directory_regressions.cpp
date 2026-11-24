@@ -102,10 +102,11 @@ namespace {
     throw std::runtime_error("Left tree is missing");
   }
 
-  void startCopyLeft(QDirDiffWidget& widget)
+  void startCopy(QDirDiffWidget& widget, bool leftToRight = true)
   {
+    const auto key = leftToRight ? Qt::Key_W : Qt::Key_Q;
     for (auto* shortcut : widget.findChildren<QShortcut*>()) {
-      if (shortcut->key() != QKeySequence(Qt::CTRL | Qt::Key_W)) continue;
+      if (shortcut->key() != QKeySequence(Qt::CTRL | key)) continue;
       check(QMetaObject::invokeMethod(shortcut, "activated"), "Copy action unavailable");
       return;
     }
@@ -115,7 +116,7 @@ namespace {
   void copyLeftRow(QDirDiffWidget& widget, const QString& name)
   {
     selectLeftRow(widget, name);
-    waitForComparison(widget, [&] { startCopyLeft(widget); });
+    waitForComparison(widget, [&] { startCopy(widget); });
   }
 
   // Hold the only Qt worker so the test can cancel through the UI before disk I/O starts.
@@ -204,7 +205,7 @@ namespace {
     selectLeftRow(widget, "batch");
     waitForComparison(widget, [&] {
       OccupiedPool occupied;
-      startCopyLeft(widget);
+      startCopy(widget);
       check(widget.statusText() == "Copying…", "Copy should return to the GUI while queued");
       cancelJob(widget);
     });
@@ -357,6 +358,7 @@ namespace {
     auto* tabs = window.findChild<QTabWidget*>();
     auto* directory = tabs ? qobject_cast<QDirDiffWidget*>(tabs->currentWidget()) : nullptr;
     check(stats && fileDiff && directory, "Directory Stats controls are missing");
+    check(!stats->icon().pixmap(24, 24).isNull(), "Stats icon could not be rendered");
     check(!stats->isEnabled(), "Stats should be disabled before comparing");
     compare(*directory, left, right);
     check(stats->isEnabled(), "Stats should be enabled after a successful comparison");
@@ -465,6 +467,90 @@ namespace {
     check(readFile(right, "batch/changed.txt") == "source", "Copy after refresh should use the new fingerprint");
   }
 
+  void localCopy(const QDir& left, const QDir& right)
+  {
+    writeFile(left, "batch/changed.txt", "left");
+    writeFile(right, "batch/changed.txt", "right");
+    writeFile(left, "batch/left-only.txt", "left only");
+    writeFile(right, "batch/right-only.txt", "right only");
+    writeFile(left, "created/sub/file.txt", "new folder contents");
+    writeFile(left, "unrelated/file.txt", "unrelated");
+    QDirDiffWidget widget;
+    compare(widget, left, right);
+    auto* model = widget.proxyModel();
+    int resets = 0;
+    QObject::connect(model->sourceModel(), &QAbstractItemModel::modelReset, &widget, [&] { ++resets; });
+    auto* view = selectLeftRow(widget, "created");
+    const QPersistentModelIndex unrelated(rowNamed(model, "unrelated"));
+    view->collapse(unrelated);
+    const auto sub = rowNamed(model, "sub", 0, view->currentIndex());
+    const auto file = rowNamed(model, "file.txt", 0, sub);
+    check(file.isValid(), "Nested one-sided copy source is missing");
+    view->selectionModel()->setCurrentIndex(file, QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+    waitForComparison(widget, [&] { startCopy(widget); });
+    check(readFile(right, "created/sub/file.txt") == "new folder contents", "Nested file copy failed");
+    check(!rowNamed(model, "created").isValid(), "A resolved one-sided branch should disappear");
+    check(resets == 0 && unrelated.isValid() && !view->isExpanded(unrelated),
+      "A successful copy should preserve the rest of the view");
+
+    copyLeftRow(widget, "batch");
+    const auto batch = rowNamed(model, "batch");
+    check(batch.isValid() && !rowNamed(model, "changed.txt", 0, batch).isValid() &&
+      !rowNamed(model, "left-only.txt", 0, batch).isValid(), "Successful copies should disappear from the view");
+    check(rowNamed(model, "right-only.txt", 2, batch).isValid(), "Copy should preserve destination-only rows");
+    check(readFile(right, "batch/changed.txt") == "left", "The changed file was not copied");
+
+    selectLeftRow(widget, "batch");
+    waitForComparison(widget, [&] { startCopy(widget, false); });
+    check(readFile(left, "batch/right-only.txt") == "right only" && !rowNamed(model, "batch").isValid(),
+      "A second copy should use the updated fingerprints and resolve the folder");
+    check(resets == 0 && widget.hasComparisonStats(), "Successful folder copies should keep the current comparison");
+
+    waitForComparison(widget, [&] { widget.compareDirs(); });
+    check(rowNamed(model, "batch").isValid(), "An explicit comparison should display matching entries again");
+  }
+
+  void defaultFileCompare(const QDir& left, const QDir& right)
+  {
+    writeFile(left, "folder/one-sided.txt", "left only");
+    check(QDir().mkpath(right.path()), "Could not create right fixture root");
+    QDirDiffWidget widget;
+    widget.resize(900, 500);
+    widget.show();
+    compare(widget, left, right);
+    QApplication::processEvents();
+    auto* view = selectLeftRow(widget, "folder");
+    const auto folder = view->currentIndex();
+    const auto file = rowNamed(view->model(), "one-sided.txt", 0, folder);
+    check(file.isValid(), "File comparison fixture row is missing");
+
+    int comparisons = 0;
+    bool correctPaths = false;
+    QObject::connect(&widget, &QDirDiffWidget::compareFileRequested, &widget,
+      [&](const QString& a, const QString& b, bool leftMissing, bool rightMissing) {
+        ++comparisons;
+        correctPaths = a == left.filePath("folder/one-sided.txt") && b == right.filePath("folder/one-sided.txt") &&
+          !leftMissing && rightMissing;
+      });
+    check(QMetaObject::invokeMethod(view, "doubleClicked", folder) && comparisons == 0,
+      "Double-clicking a folder should not open File Diff");
+    check(QMetaObject::invokeMethod(view, "doubleClicked", file) && comparisons == 1 && correctPaths,
+      "Double-clicking a file should request File Diff for the same pair as the menu");
+
+    bool boldDefault = false;
+    const auto position = view->visualRect(file).center();
+    QTimer::singleShot(0, view, [&] {
+      auto* menu = qobject_cast<QMenu*>(QApplication::activePopupWidget());
+      if (!menu) return;
+      auto* action = actionNamed(*menu, "Compare files");
+      boldDefault = action && menu->defaultAction() == action && action->font().bold();
+      menu->close();
+      if (action) action->trigger();
+    });
+    check(QMetaObject::invokeMethod(view, "customContextMenuRequested", position), "Context menu unavailable");
+    check(boldDefault && comparisons == 2 && correctPaths, "Compare files should be the bold default menu action");
+  }
+
   void caseAliases(const QDir& left, const QDir& right)
   {
     writeFile(left, "Docs/Readme.txt", "source");
@@ -532,6 +618,10 @@ int main(int argc, char** argv)
       clipboardActions(left, right);
     else if (test == "comparison-stats")
       comparisonStats(left, right);
+    else if (test == "local-copy")
+      localCopy(left, right);
+    else if (test == "default-file-compare")
+      defaultFileCompare(left, right);
     else if (test == "file-tab-width")
       fileTabWidth();
     else
