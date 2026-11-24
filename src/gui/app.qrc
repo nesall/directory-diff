@@ -59,5 +59,7 @@
     <file alias="subpixeltest">resources/icons/subpixeltest.svg</file>
     <file alias="arrow-left-from-line">resources/icons/arrow-left-from-line.svg</file>
     <file alias="arrow-right-from-line">resources/icons/arrow-right-from-line.svg</file>
+    <file alias="chevron-left-solid-full">resources/icons/chevron-left-solid-full.svg</file>
+    <file alias="chevron-right-solid-full">resources/icons/chevron-right-solid-full.svg</file>    
   </qresource>
 </RCC>

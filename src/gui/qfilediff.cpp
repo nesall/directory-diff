@@ -7,12 +7,14 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QDir>
+#include <QEvent>
 #include <QFile>
 #include <QFileInfo>
 #include <QFontDatabase>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QMessageBox>
+#include <QPainter>
 #include <QSaveFile>
 #include <QSettings>
 #include <QStyle>
@@ -23,8 +25,65 @@
 
 #include <algorithm>
 #include <iterator>
+#include <utility>
+#include <vector>
 
 namespace {
+  class FileDiffToolBar : public QToolBar {
+  public:
+    explicit FileDiffToolBar(QWidget* parent) : QToolBar(parent)
+    {
+      connect(this, &QToolBar::iconSizeChanged, this, &FileDiffToolBar::refreshArrowIcons);
+    }
+
+    QAction* addArrowAction(QStyle::StandardPixmap arrow, const QString& text, auto handler)
+    {
+      auto* action = addAction(text, this, std::move(handler));
+      arrows_.emplace_back(action, arrow);
+      setArrowIcon(action, arrow);
+      return action;
+    }
+
+  protected:
+    void changeEvent(QEvent* event) override
+    {
+      QToolBar::changeEvent(event);
+      if (event->type() == QEvent::PaletteChange || event->type() == QEvent::StyleChange)
+        refreshArrowIcons();
+    }
+
+  private:
+    void refreshArrowIcons()
+    {
+      for (const auto& [action, arrow] : arrows_)
+        setArrowIcon(action, arrow);
+    }
+
+    void setArrowIcon(QAction* action, QStyle::StandardPixmap arrow)
+    {
+      const QIcon original = style()->standardIcon(arrow, nullptr, this);
+      QIcon tinted;
+      for (qreal scale : { 1.0, 2.0 }) {
+        const QPixmap mask = original.pixmap(iconSize(), scale);
+        if (mask.isNull()) continue;
+        for (auto mode : { QIcon::Normal, QIcon::Disabled }) {
+          const auto group = mode == QIcon::Disabled ? QPalette::Disabled : QPalette::Active;
+          QPixmap pixmap = mask;
+          {
+            QPainter painter(&pixmap);
+            painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
+            painter.fillRect(QRectF(QPointF(), pixmap.deviceIndependentSize()),
+              palette().color(group, QPalette::ButtonText));
+          }
+          tinted.addPixmap(pixmap, mode);
+        }
+      }
+      action->setIcon(tinted.isNull() ? original : tinted);
+    }
+
+    std::vector<std::pair<QAction*, QStyle::StandardPixmap>> arrows_;
+  };
+
   QString displayLine(const Line& line)
   {
     constexpr qsizetype tabWidth = 2;
@@ -186,20 +245,16 @@ QFileDiffWidget::QFileDiffWidget(QWidget* parent)
   }
   layout->addLayout(paths);
 
-  auto* toolbar = new QToolBar(this);
+  auto* toolbar = new FileDiffToolBar(this);
   toolbar->setToolButtonStyle(Qt::ToolButtonIconOnly);
 #ifdef Q_OS_MACOS
   toolbar->setIconSize(QSize(16, 16));
 #endif
-  previous_ = toolbar->addAction(style()->standardIcon(QStyle::SP_ArrowUp), tr("Previous Change"),
-    this, [this] { navigate(-1); });
-  next_ = toolbar->addAction(style()->standardIcon(QStyle::SP_ArrowDown), tr("Next Change"),
-    this, [this] { navigate(1); });
+  previous_ = toolbar->addArrowAction(QStyle::SP_ArrowUp, tr("Previous Change"), [this] { navigate(-1); });
+  next_ = toolbar->addArrowAction(QStyle::SP_ArrowDown, tr("Next Change"), [this] { navigate(1); });
   toolbar->addSeparator();
-  apply_[0] = toolbar->addAction(style()->standardIcon(QStyle::SP_ArrowLeft), tr("Apply to Left"),
-    this, [this] { applyChange(0); });
-  apply_[1] = toolbar->addAction(style()->standardIcon(QStyle::SP_ArrowRight), tr("Apply to Right"),
-    this, [this] { applyChange(1); });
+  apply_[0] = toolbar->addArrowAction(QStyle::SP_ArrowLeft, tr("Apply to Left"), [this] { applyChange(0); });
+  apply_[1] = toolbar->addArrowAction(QStyle::SP_ArrowRight, tr("Apply to Right"), [this] { applyChange(1); });
   undo_ = toolbar->addAction(QIcon(":/undo"), tr("Undo"), this, &QFileDiffWidget::undoChange);
   toolbar->addSeparator();
   save_[0] = toolbar->addAction(QIcon(":/save-left"), tr("Save Left"), this, [this] { saveFile(0); });

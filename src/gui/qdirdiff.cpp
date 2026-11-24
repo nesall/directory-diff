@@ -447,7 +447,7 @@ void QDirDiffWidget::setupViews()
         static QIcon iconDel; 
         if (iconDel.isNull())
           iconDel = QApplication::style()->standardIcon(QStyle::SP_TrashIcon);
-        auto *actDel = menu.addAction(tr("Delete"));
+        auto *actDel = menu.addAction(iconDel, tr("Delete"));
 
         actView->setEnabled(!node->isDir());
         if (actView->isEnabled()) {

@@ -10,6 +10,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QFormLayout>
+#include <QImage>
 #include <QLabel>
 #include <QMap>
 #include <QMenu>
@@ -22,6 +23,7 @@
 #include <QTemporaryDir>
 #include <QThreadPool>
 #include <QTimer>
+#include <QToolBar>
 
 #include <iostream>
 #include <stdexcept>
@@ -588,6 +590,39 @@ namespace {
   }
 }
 
+static void fileArrowPalette()
+{
+  QFileDiffWidget widget;
+  auto* toolbar = widget.findChild<QToolBar*>();
+  check(toolbar, "File Diff toolbar is missing");
+  QPalette palette = widget.palette();
+  const QColor disabledText(128, 128, 128);
+  palette.setColor(QPalette::Disabled, QPalette::ButtonText, disabledText);
+
+  for (const QColor foreground : { QColor(Qt::black), QColor(Qt::white) }) {
+    palette.setColor(QPalette::Active, QPalette::ButtonText, foreground);
+    widget.setPalette(palette);
+    for (const auto* name : { "Previous Change", "Next Change", "Apply to Left", "Apply to Right" }) {
+      const auto* action = actionNamed(*toolbar, name);
+      check(action, "A File Diff arrow action is missing");
+      for (const auto mode : { QIcon::Normal, QIcon::Disabled }) {
+        const QColor expected = mode == QIcon::Normal ? foreground : disabledText;
+        const QImage image = action->icon().pixmap(toolbar->iconSize(), 2.0, mode).toImage();
+        bool hasForeground = false;
+        bool hasTransparency = false;
+        for (int y = 0; y < image.height(); ++y) {
+          for (int x = 0; x < image.width(); ++x) {
+            const QColor pixel = image.pixelColor(x, y);
+            hasForeground |= pixel == expected;
+            hasTransparency |= pixel.alpha() == 0;
+          }
+        }
+        check(hasForeground && hasTransparency, "Arrow should use the current palette and retain transparency");
+      }
+    }
+  }
+}
+
 int main(int argc, char** argv)
 {
   QApplication app(argc, argv);
@@ -624,6 +659,8 @@ int main(int argc, char** argv)
       defaultFileCompare(left, right);
     else if (test == "file-tab-width")
       fileTabWidth();
+    else if (test == "file-arrow-palette")
+      fileArrowPalette();
     else
       throw std::runtime_error("Unknown regression");
     return 0;
