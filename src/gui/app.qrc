@@ -56,5 +56,7 @@
     <file alias="xmark">resources/icons/xmark.svg</file>
     <file alias="circle-xmark">resources/icons/circle-xmark.svg</file>
     <file alias="subpixeltest">resources/icons/subpixeltest.svg</file>
+    <file alias="arrow-left-from-line">resources/icons/arrow-left-from-line.svg</file>
+    <file alias="arrow-right-from-line">resources/icons/arrow-right-from-line.svg</file>
   </qresource>
 </RCC>

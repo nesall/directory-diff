@@ -188,6 +188,9 @@ QFileDiffWidget::QFileDiffWidget(QWidget* parent)
 
   auto* toolbar = new QToolBar(this);
   toolbar->setToolButtonStyle(Qt::ToolButtonIconOnly);
+#ifdef Q_OS_MACOS
+  toolbar->setIconSize(QSize(16, 16));
+#endif
   previous_ = toolbar->addAction(style()->standardIcon(QStyle::SP_ArrowUp), tr("Previous Change"),
     this, [this] { navigate(-1); });
   next_ = toolbar->addAction(style()->standardIcon(QStyle::SP_ArrowDown), tr("Next Change"),

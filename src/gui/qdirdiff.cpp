@@ -419,8 +419,8 @@ void QDirDiffWidget::setupViews()
         QMenu menu;
         auto *actView = menu.addAction(tr("Compare files"));
         menu.addSeparator();
-        auto *actLR = menu.addAction(tr("Copy Left → Right\tCtrl+W"));
-        auto *actRL = menu.addAction(tr("Copy Right → Left\tCtrl+Q"));
+        auto *actLR = menu.addAction(QIcon(":/arrow-right-from-line"), tr("Copy Left to Right"), QKeySequence("Ctrl+W"));
+        auto *actRL = menu.addAction(QIcon(":/arrow-left-from-line"), tr("Copy Right to Left"), QKeySequence("Ctrl+Q"));
         menu.addSeparator();
         static QIcon iconDel; 
         if (iconDel.isNull())
@@ -860,14 +860,19 @@ void QDirDiffWidget::deleteEntry(const QModelIndex &idx, bool leftSide)
   });
 }
 
-void QDirDiffWidget::expandAll(bool expand)
+void QDirDiffWidget::expandChangedFolders(const QModelIndex &parent)
 {
-  if (expand) {
-    viewLeft_->expandAll();
-    viewRight_->expandAll();
-  } else {
-    viewLeft_->collapseAll();
-    viewRight_->collapseAll();
+  const int rows = proxy_->rowCount(parent);
+  for (int row = 0; row < rows; ++row) {
+    const auto index = proxy_->index(row, 0, parent);
+    if (!index.data(IsDirRole).toBool() ||
+        index.data(DiffTypeRole).toInt() == static_cast<int>(DiffType::Identical) ||
+        !proxy_->hasChildren(index))
+      continue;
+
+    // The shared expansion handler opens the corresponding row on the right.
+    viewLeft_->expand(index);
+    expandChangedFolders(index);
   }
 }
 
@@ -1062,7 +1067,7 @@ void QDirDiffWidget::onDiffFinished()
       model_->setDiffResults(result.files, result.leftRoot, result.rightRoot);
       viewLeft_->header()->resizeSections(QHeaderView::ResizeToContents);
       viewRight_->header()->resizeSections(QHeaderView::ResizeToContents);
-      expandAll(true);
+      expandChangedFolders();
       const auto differences = std::count_if(result.files.begin(), result.files.end(),
         [](const FileDiff &entry) { return entry.type != DiffType::Identical; });
       message = tr("Done. %1 differences found.").arg(differences);

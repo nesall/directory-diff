@@ -134,7 +134,7 @@ if(BUILD_TESTING)
   if(WIN32)
     set(directory_diff_test_path "$<TARGET_FILE_DIR:Qt6::Core>;$ENV{PATH}")
   endif()
-  foreach(regression IN ITEMS stale-copy case-aliases background-jobs comparison-progress file-tab-width)
+  foreach(regression IN ITEMS stale-copy case-aliases background-jobs comparison-progress file-tab-width folder-expansion)
     add_test(NAME directory-${regression}
       COMMAND ${CMAKE_COMMAND} -E env "QT_QPA_PLATFORM=offscreen" "PATH=${directory_diff_test_path}"
         $<TARGET_FILE:directory_diff_regressions> ${regression}

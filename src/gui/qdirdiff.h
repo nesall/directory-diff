@@ -63,7 +63,7 @@ private:
   void endJob();
   void updateProgress();
   void showStatus(const QString& message);
-  void expandAll(bool expand);
+  void expandChangedFolders(const QModelIndex& parent = {});
 
 private:
   struct ComparisonResult {

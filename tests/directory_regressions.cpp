@@ -238,6 +238,53 @@ namespace {
       "Fingerprinting should honor cancellation");
   }
 
+  void folderExpansion(const QDir& left, const QDir& right)
+  {
+    for (const auto& root : { left, right }) {
+      writeFile(root, "matching/nested/file.txt", "same");
+      writeFile(root, "mixed/matching/file.txt", "same");
+    }
+    writeFile(left, "mixed/changed/nested/file.txt", "left");
+    writeFile(right, "mixed/changed/nested/file.txt", "rght");
+    writeFile(left, "mixed/left-only/file.txt", "left");
+    writeFile(right, "mixed/right-only/file.txt", "right");
+    writeFile(left, "mixed/conflict", "file");
+    writeFile(right, "mixed/conflict/child.txt", "folder");
+
+    QDirDiffWidget widget;
+    compare(widget, left, right);
+    auto* model = widget.proxyModel();
+    const auto views = widget.findChildren<QTreeView*>();
+    check(views.size() == 2, "Expected two directory panes");
+    const auto expandedInBoth = [&](const QModelIndex& index, bool expected, const char* message) {
+      check(index.isValid(), "Expected folder row is missing");
+      for (auto* view : views)
+        check(view->isExpanded(index) == expected, message);
+    };
+
+    const auto matching = rowNamed(model, "matching");
+    const auto mixed = rowNamed(model, "mixed");
+    const auto changed = rowNamed(model, "changed", 0, mixed);
+    expandedInBoth(matching, false, "A matching tree should start collapsed");
+    expandedInBoth(rowNamed(model, "matching", 0, mixed), false, "A matching branch should start collapsed");
+    expandedInBoth(mixed, true, "An ancestor of changed entries should start expanded");
+    expandedInBoth(changed, true, "A branch with a nested edit should start expanded");
+    expandedInBoth(rowNamed(model, "nested", 0, changed), true, "A nested edit should be visible");
+    expandedInBoth(rowNamed(model, "left-only", 0, mixed), true, "A left-only branch should start expanded");
+    expandedInBoth(rowNamed(model, "right-only", 2, mixed).siblingAtColumn(0), true,
+      "A right-only branch should start expanded");
+    expandedInBoth(rowNamed(model, "conflict", 0, mixed), true, "A file/folder conflict should start expanded");
+
+    views.back()->expand(matching);
+    expandedInBoth(matching, true, "Manually opening a matching folder should open both panes");
+    views.front()->collapse(matching);
+    expandedInBoth(matching, false, "Manually closing a matching folder should close both panes");
+
+    writeFile(right, "matching/nested/file.txt", "edit");
+    waitForComparison(widget, [&] { widget.compareDirs(); });
+    expandedInBoth(rowNamed(model, "matching"), true, "A formerly matching folder should open after a new change");
+  }
+
   void fileTabWidth()
   {
     const QString longPath = QStringLiteral("C:/project/") + QString(170, 'W') + ".txt";
@@ -373,6 +420,8 @@ int main(int argc, char** argv)
       backgroundJobs(left, right);
     else if (test == "comparison-progress")
       comparisonProgress(left, right);
+    else if (test == "folder-expansion")
+      folderExpansion(left, right);
     else if (test == "file-tab-width")
       fileTabWidth();
     else
