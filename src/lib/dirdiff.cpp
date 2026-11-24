@@ -5,6 +5,12 @@
 #include <regex>
 #include <string>
 #include <thread>
+#include <utility>
+
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -90,9 +96,12 @@ namespace {
   };
 
   template<typename OnEntry>
-  void scanEntries(const fs::path& root, const DiffOptions& options, const IgnoreMatcher& ignore, OnEntry onEntry) {
+  void scanEntries(const fs::path& root, const DiffOptions& options, const IgnoreMatcher& ignore,
+    std::stop_token stop, DirectoryDiffProgress* progress, OnEntry onEntry) {
+    if (stop.stop_requested()) return;
     fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied), end;
-    for (; it != end; ++it) {
+    for (; it != end && !stop.stop_requested(); ++it) {
+      if (progress) ++progress->scanned;
       const auto& entry = *it;
       const auto relativePath = entry.path().lexically_relative(root);
       const bool directory = entry.is_directory();
@@ -111,68 +120,195 @@ namespace {
   }
 } // anonymous namespace
 
+namespace {
+  using Entries = std::map<fs::path, DiffEntryKind>;
+
+#ifdef _WIN32
+  struct CaseInsensitivePathLess {
+    bool operator()(const fs::path& a, const fs::path& b) const
+    {
+      return CompareStringOrdinal(a.c_str(), -1, b.c_str(), -1, TRUE) == CSTR_LESS_THAN;
+    }
+  };
+
+  void pairCaseAliases(const fs::path& leftRoot, const fs::path& rightRoot,
+    std::vector<FileDiff>& diffs, Entries& unpairedRight, std::stop_token stop)
+  {
+    struct Candidates {
+      std::vector<FileDiff*> left;
+      std::vector<Entries::iterator> right;
+    };
+    std::map<fs::path, Candidates, CaseInsensitivePathLess> candidates;
+    for (auto& diff : diffs) {
+      if (stop.stop_requested()) return;
+      if (diff.rightKind == DiffEntryKind::Missing)
+        candidates[diff.relativePath].left.push_back(&diff);
+    }
+    for (auto right = unpairedRight.begin(); right != unpairedRight.end(); ++right) {
+      if (stop.stop_requested()) return;
+      candidates[right->first].right.push_back(right);
+    }
+
+    for (auto& [path, group] : candidates) {
+      if (stop.stop_requested()) return;
+      // Exact matches have priority. Ambiguous aliases stay separate.
+      if (group.left.size() != 1 || group.right.size() != 1) continue;
+      auto& left = *group.left.front();
+      const auto right = group.right.front();
+      std::error_code ignored;
+      if (!fs::equivalent(leftRoot / left.relativePath, leftRoot / right->first, ignored) &&
+          !fs::equivalent(rightRoot / left.relativePath, rightRoot / right->first, ignored))
+        continue;
+      left.rightRelativePath = right->first;
+      left.rightKind = right->second;
+      unpairedRight.erase(right);
+    }
+  }
+#endif
+}
+
 size_t diffDirectories(
   const fs::path& dirA,
   const fs::path& dirB,
   const DiffOptions& options,
   DiffCallback onDiffFound)
 {
-  struct ComparedEntry {
-    DiffEntryKind left = DiffEntryKind::Missing;
-    DiffEntryKind right = DiffEntryKind::Missing;
-    DiffType result = DiffType::Identical;
-  };
+  return *diffDirectories(dirA, dirB, options, std::move(onDiffFound), {});
+}
 
-  std::map<fs::path, ComparedEntry> entries;
+std::optional<size_t> diffDirectories(
+  const fs::path& dirA,
+  const fs::path& dirB,
+  const DiffOptions& options,
+  DiffCallback onDiffFound,
+  std::stop_token stop,
+  DirectoryDiffProgress* progress)
+{
+  Entries left, right;
   const IgnoreMatcher ignore(options.ignorePatterns);
-  scanEntries(dirA, options, ignore, [&](const fs::path& path, DiffEntryKind kind) {
-    entries[path].left = kind;
-  });
-  scanEntries(dirB, options, ignore, [&](const fs::path& path, DiffEntryKind kind) {
-    entries[path].right = kind;
-  });
+  scanEntries(dirA, options, ignore, stop, progress,
+    [&](const fs::path& path, DiffEntryKind kind) { left.emplace(path, kind); });
+  scanEntries(dirB, options, ignore, stop, progress,
+    [&](const fs::path& path, DiffEntryKind kind) { right.emplace(path, kind); });
+  if (stop.stop_requested()) return std::nullopt;
+  if (progress) progress->phase = DirectoryDiffPhase::Matching;
 
-  using Entry = decltype(entries)::value_type;
-  std::vector<Entry*> pairs;
-  for (auto& entry : entries) {
-    auto& diff = entry.second;
-    if (diff.left == DiffEntryKind::Missing)
-      diff.result = DiffType::Added;
-    else if (diff.right == DiffEntryKind::Missing)
-      diff.result = DiffType::Removed;
-    else if (diff.left != diff.right)
-      diff.result = DiffType::Modified;
-    else if (diff.left == DiffEntryKind::File)
-      pairs.push_back(&entry);
+  std::vector<FileDiff> entries;
+  entries.reserve(left.size() + right.size());
+  for (const auto& [path, kind] : left) {
+    if (stop.stop_requested()) return std::nullopt;
+    const auto match = right.find(path);
+    entries.push_back({ path, DiffType::Removed, kind,
+      match == right.end() ? DiffEntryKind::Missing : match->second });
+    if (match != right.end())
+      right.erase(match);
   }
 
-  if (!pairs.empty()) {
-    const auto numThreads = std::min<size_t>(std::max(1u, std::thread::hardware_concurrency()), pairs.size());
+  std::map<fs::path, fs::path> rightDirectoryAliases;
+#ifdef _WIN32
+  pairCaseAliases(dirA, dirB, entries, right, stop);
+  for (const auto& entry : entries) {
+    if (stop.stop_requested()) return std::nullopt;
+    if (entry.rightKind == DiffEntryKind::Directory && !entry.rightRelativePath.empty())
+      rightDirectoryAliases.emplace(entry.rightRelativePath, entry.relativePath);
+  }
+#endif
+
+  for (const auto& [rightPath, kind] : right) {
+    if (stop.stop_requested()) return std::nullopt;
+    auto logicalPath = rightPath;
+    for (auto parent = rightPath.parent_path(); !rightDirectoryAliases.empty() && !parent.empty(); parent = parent.parent_path()) {
+      if (const auto alias = rightDirectoryAliases.find(parent); alias != rightDirectoryAliases.end()) {
+        logicalPath = alias->second / rightPath.lexically_relative(parent);
+        break;
+      }
+    }
+    if (logicalPath != rightPath) {
+      const auto originalLeftEnd = entries.begin() + left.size();
+      const auto match = std::lower_bound(entries.begin(), originalLeftEnd, logicalPath,
+        [](const FileDiff& entry, const fs::path& path) { return entry.relativePath < path; });
+      if (match != originalLeftEnd && match->relativePath == logicalPath &&
+          match->rightKind == DiffEntryKind::Missing) {
+        match->rightKind = kind;
+        match->rightRelativePath = rightPath;
+        if (kind == DiffEntryKind::Directory)
+          rightDirectoryAliases.emplace(rightPath, logicalPath);
+        continue;
+      }
+    }
+    entries.push_back({ logicalPath, DiffType::Added, DiffEntryKind::Missing, kind,
+      logicalPath == rightPath ? fs::path{} : rightPath });
+  }
+
+  std::vector<FileDiff*> work;
+  for (auto& entry : entries) {
+    if (stop.stop_requested()) return std::nullopt;
+    if (entry.leftKind == DiffEntryKind::Missing)
+      entry.type = DiffType::Added;
+    else if (entry.rightKind == DiffEntryKind::Missing)
+      entry.type = DiffType::Removed;
+    else if (entry.leftKind != entry.rightKind)
+      entry.type = DiffType::Modified;
+    else
+      entry.type = DiffType::Identical;
+
+    if ((entry.leftKind == DiffEntryKind::File && entry.rightKind == DiffEntryKind::File) ||
+        (options.captureFileFingerprints &&
+          (entry.leftKind == DiffEntryKind::File || entry.rightKind == DiffEntryKind::File)))
+      work.push_back(&entry);
+  }
+
+  if (!work.empty()) {
+    if (progress) {
+      progress->filesToCompare = work.size();
+      progress->phase = DirectoryDiffPhase::Comparing;
+    }
+    const auto numThreads = std::min<size_t>(std::max(1u, std::thread::hardware_concurrency()), work.size());
     std::atomic<size_t> next = 0;
     std::vector<std::jthread> threads;
     for (size_t t = 0; t < numThreads; ++t) {
       threads.emplace_back([&] {
-        while (true) {
+        while (!stop.stop_requested()) {
           const auto index = next.fetch_add(1);
-          if (index >= pairs.size()) break;
-          auto& [path, diff] = *pairs[index];
-          try {
-            diff.result = diffFile(dirA / path, dirB / path, options);
-          } catch (const fs::filesystem_error&) {
-            // A file may be removed or become unreadable during comparison.
-            diff.result = DiffType::Modified;
+          if (index >= work.size()) break;
+          auto& entry = *work[index];
+          const auto pathA = dirA / entry.relativePath;
+          const auto pathB = dirB / (entry.rightRelativePath.empty() ? entry.relativePath : entry.rightRelativePath);
+          const bool bothFiles = entry.leftKind == DiffEntryKind::File && entry.rightKind == DiffEntryKind::File;
+          if (options.captureFileFingerprints) {
+            if (entry.leftKind == DiffEntryKind::File)
+              entry.leftFingerprint = fingerprintFile(pathA, stop);
+            if (entry.rightKind == DiffEntryKind::File)
+              entry.rightFingerprint = fingerprintFile(pathB, stop);
+            if (bothFiles && (!options.useHash || !entry.leftFingerprint ||
+                entry.leftFingerprint != entry.rightFingerprint))
+              entry.type = DiffType::Modified;
+          } else {
+            try {
+              entry.type = diffFile(pathA, pathB, options, stop);
+            } catch (const fs::filesystem_error&) {
+              entry.type = DiffType::Modified;
+            }
           }
+          if (progress && !stop.stop_requested()) ++progress->compared;
         }
       });
     }
   }
 
+  if (stop.stop_requested()) return std::nullopt;
+  if (progress) progress->phase = DirectoryDiffPhase::Finalizing;
+  std::sort(entries.begin(), entries.end(), [](const FileDiff& a, const FileDiff& b) {
+    return a.relativePath < b.relativePath;
+  });
   size_t identicalFiles = 0;
-  for (const auto& [path, diff] : entries) {
-    if (diff.result == DiffType::Identical && diff.left == DiffEntryKind::File)
+  for (const auto& entry : entries) {
+    if (stop.stop_requested()) return std::nullopt;
+    if (entry.type == DiffType::Identical && entry.leftKind == DiffEntryKind::File)
       ++identicalFiles;
-    if (options.includeIdentical || diff.result != DiffType::Identical)
-      onDiffFound({ path, diff.result, diff.left, diff.right });
+    if (options.includeIdentical || entry.type != DiffType::Identical)
+      onDiffFound(entry);
   }
+  if (stop.stop_requested()) return std::nullopt;
   return identicalFiles;
 }

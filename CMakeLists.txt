@@ -75,6 +75,7 @@ add_executable(directory_diff_gui
   ./Qt6.natvis
   src/gui/app.qrc
   src/gui/main.cpp
+  src/gui/filemutation.h
   src/gui/persistentwnd.h
   src/gui/qdirdiff.h
   src/gui/qdirdiff.cpp
@@ -113,3 +114,30 @@ else()
 endif()
 
 find_package(Threads REQUIRED)
+
+include(CTest)
+if(BUILD_TESTING)
+  add_executable(directory_diff_regressions
+    tests/directory_regressions.cpp
+    src/gui/app.qrc
+    src/gui/qdirdiff.cpp
+    src/gui/qdirdiff.h
+    src/gui/qfilediff.cpp
+    src/gui/qfilediff.h
+    src/gui/qmainwindow.cpp
+    src/gui/qmainwindow.h
+  )
+  target_include_directories(directory_diff_regressions PRIVATE src/gui)
+  target_link_libraries(directory_diff_regressions PRIVATE Qt6::Widgets directory_diff_lib)
+
+  set(directory_diff_test_path "$ENV{PATH}")
+  if(WIN32)
+    set(directory_diff_test_path "$<TARGET_FILE_DIR:Qt6::Core>;$ENV{PATH}")
+  endif()
+  foreach(regression IN ITEMS stale-copy case-aliases background-jobs comparison-progress file-tab-width)
+    add_test(NAME directory-${regression}
+      COMMAND ${CMAKE_COMMAND} -E env "QT_QPA_PLATFORM=offscreen" "PATH=${directory_diff_test_path}"
+        $<TARGET_FILE:directory_diff_regressions> ${regression}
+    )
+  endforeach()
+endif()

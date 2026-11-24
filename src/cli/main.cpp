@@ -85,7 +85,9 @@ int main(int argc, char* argv[]) {
         std::string color = "\033[" + ansiColors[symbol] + "m";
         const auto suffix = diff.leftKind == DiffEntryKind::Directory || diff.rightKind == DiffEntryKind::Directory
           ? "/" : "";
-        fmt::print("{}[{}] \033[0m{}{}\n", color, symbol, diff.relativePath, suffix);
+        const auto& path = diff.type == DiffType::Added && !diff.rightRelativePath.empty()
+          ? diff.rightRelativePath : diff.relativePath;
+        fmt::print("{}[{}] \033[0m{}{}\n", color, symbol, path, suffix);
         });
       std::cout << "Comparison complete." << std::endl;
       std::cout << "Nof identical files: " << nofIdentical << std::endl;

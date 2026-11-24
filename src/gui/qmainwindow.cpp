@@ -176,8 +176,10 @@ void QMainWindowDiff::createCentralWidgets()
   setCentralWidget(central);
   central->setTabsClosable(true);
   connect(central, &QTabWidget::currentChanged, this, [this, central] {
+    const auto *directory = qobject_cast<QDirDiffWidget *>(central->currentWidget());
     const auto *file = qobject_cast<QFileDiffWidget *>(central->currentWidget());
-    statusBar()->showMessage(file && !file->statusText().isEmpty() ? file->statusText() : tr("Ready"));
+    const QString status = directory ? directory->statusText() : file ? file->statusText() : QString();
+    statusBar()->showMessage(status.isEmpty() ? tr("Ready") : status);
     });
   actNewDirDiff_->trigger();
   connect(central, &QTabWidget::tabCloseRequested, this, [central](int index) {

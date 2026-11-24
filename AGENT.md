@@ -27,11 +27,11 @@ The CLI and GUI share the UTF-8 text loader and Myers diff. Preserve both origin
 
 ## Directory file operations
 
-Resolve operations against the roots of the displayed comparison and validate the selected entry on disk. Copy each file using atomic replacement. Capture the selected rows before changing the filesystem, then refresh once after the batch. Report partial failures and keep the deletion confirmation tied to the resolved path. A recursive operation skips symbolic links and junctions.
+Resolve operations against the roots of the displayed comparison and validate the selected entry on disk. Copy each file using atomic replacement. Give the worker a read-only snapshot of the selected rows and refresh once after the batch, including on cancellation. A canceled copy discards any staged file and preserves committed changes. A canceled delete preserves deletions already made. Report partial failures and keep the deletion confirmation tied to the resolved path. A recursive operation skips symbolic links and junctions.
 
 ## Verification
 
-Follow the build commands in [README.md](README.md). The project currently has no registered CTest tests. Use disposable directory fixtures for manual checks and cover the entry points affected by the change.
+Follow the build commands in [README.md](README.md). Run `ctest --test-dir build/release --output-on-failure` to check stale directory-copy destinations, Windows case aliases, and directory job progress and cancellation. Use disposable directory fixtures for additional manual checks and cover the entry points affected by the change.
 
 - **Directory CLI:** compare trees containing identical files, a same-size content change, entries unique to each side, and a file matched by `--ignore`. Check the direction of each marker and the identical count.
 - **Directory GUI:** expand and collapse a nested subtree present on only one side. Scroll and toggle filters. Check that the other pane reserves blank rows and that the next shared sibling remains aligned.

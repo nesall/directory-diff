@@ -8,11 +8,18 @@
 #include <QFutureWatcher>
 #include <QSortFilterProxyModel>
 
+#include <memory>
+
 #include "directory-diff/dirdiff.h"
 
+class QLabel;
+class QProgressBar;
+class QPushButton;
+class QTimer;
 class QGenericPanelHeader;
 class QDirDiffModel;
 class QDirDiffProxyModel;
+struct QDirDiffJobState;
 struct DirDiffNode;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -21,6 +28,7 @@ class QDirDiffWidget : public QWidget {
   Q_OBJECT
 public:
   explicit QDirDiffWidget(QWidget* parent = nullptr);
+  ~QDirDiffWidget() override;
 
   void compareDirs();
   static QStringList exclusions();
@@ -28,6 +36,7 @@ public:
   QDirDiffProxyModel *proxyModel() const { return proxy_; }
   QString leftPath()  const;
   QString rightPath() const;
+  QString statusText() const { return statusText_; }
 
 Q_SIGNALS:
   void statusMessage(const QString& msg);
@@ -37,15 +46,23 @@ Q_SIGNALS:
 
 private Q_SLOTS:
   void onDiffFinished();
+  void onFileOperationFinished();
 
 private:
+  enum class Job { Compare, Copy, Delete };
+
   void setupViews();
   void syncExpansion(QTreeView* source, QTreeView* target, const QModelIndex& idx, bool expanded);
-  QString relPathForNode(const DirDiffNode* node) const;
+  QString relPathForNode(const DirDiffNode* node, bool left) const;
   void copySelection(const QModelIndexList& selection, bool leftToRight);
   void deleteEntry(const QModelIndex& idx, bool leftSide);
   QModelIndexList operationSelection(QTreeView* source) const;
+  void startFileOperation(Job kind, std::function<QString(QDirDiffJobState&)> operation);
   void startComparison(const QString& leftRoot, const QString& rightRoot, const QString& operation = {});
+  void beginJob(Job kind);
+  void endJob();
+  void updateProgress();
+  void showStatus(const QString& message);
   void expandAll(bool expand);
 
 private:
@@ -56,6 +73,11 @@ private:
     QString error;
   };
 
+  struct OperationResult {
+    QString summary;
+    bool refresh = true;
+  };
+
   QGenericPanelHeader * headerLeft_ = nullptr;
   QGenericPanelHeader * headerRight_ = nullptr;
   QTreeView* viewLeft_ = nullptr;
@@ -64,10 +86,17 @@ private:
   QDirDiffModel* model_ = nullptr;
   QDirDiffProxyModel *proxy_ = nullptr;
 
-  // async worker
   QFutureWatcher<ComparisonResult>* watcher_ = nullptr;
+  QFutureWatcher<OperationResult>* operationWatcher_ = nullptr;
+  std::shared_ptr<QDirDiffJobState> job_;
+  Job jobKind_ = Job::Compare;
+  QWidget* progressRow_ = nullptr;
+  QLabel* progressLabel_ = nullptr;
+  QProgressBar* progressBar_ = nullptr;
+  QPushButton* cancelButton_ = nullptr;
+  QTimer* progressTimer_ = nullptr;
   QString operationSummary_;
-  bool comparing_ = false;
+  QString statusText_;
   bool syncingExpansion_ = false;
   bool syncingSelection_ = false;
 };
@@ -102,14 +131,20 @@ private:
 
 struct DirDiffNode {
   QString name;
+  QString rightName;
   DiffType diffType = DiffType::Identical;
   DiffEntryKind leftKind = DiffEntryKind::Missing;
   DiffEntryKind rightKind = DiffEntryKind::Missing;
+  std::optional<FileFingerprint> leftFingerprint;
+  std::optional<FileFingerprint> rightFingerprint;
 
   DirDiffNode* parent = nullptr;
   std::vector<std::unique_ptr<DirDiffNode>> children;
 
   DiffEntryKind kind(bool left) const { return left ? leftKind : rightKind; }
+  const QString& nameOnSide(bool left) const { return left || rightName.isEmpty() ? name : rightName; }
+  const std::optional<FileFingerprint>& fingerprint(bool left) const
+  { return left ? leftFingerprint : rightFingerprint; }
   bool isDir() const;
 
   DirDiffNode* findOrAddChild(const QString& childName);
@@ -156,11 +191,12 @@ public:
 
   // nullptr => root
   DirDiffNode* nodeForIndex(const QModelIndex& idx) const;
+  std::shared_ptr<const DirDiffNode> snapshotForIndex(const QModelIndex& idx) const;
 
 private:
   void updateDirectories(DirDiffNode* node);
 
-  std::unique_ptr<DirDiffNode> root_;
+  std::shared_ptr<DirDiffNode> root_;
   QString dirA_;
   QString dirB_;
   mutable QIcon iconFolder_;

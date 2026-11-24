@@ -18,68 +18,33 @@
 namespace fs = std::filesystem;
 
 
-namespace {
+std::optional<FileFingerprint> fingerprintFile(const fs::path& path, std::stop_token stop)
+{
+  if (stop.stop_requested()) return std::nullopt;
+  std::error_code error;
+  const auto size = fs::file_size(path, error);
+  if (error) return std::nullopt;
+  const auto modified = fs::last_write_time(path, error);
+  if (error) return std::nullopt;
 
-#if 0
-  std::size_t hashFileContents(const fs::path& p) {
-    std::ifstream ifs(p, std::ios::binary);
-    if (!ifs) return 0;
-    constexpr size_t bufSize = 64 * 1024;
-    std::string buffer;
-    buffer.resize(bufSize);
-    std::size_t hash = 1469598103934665603ull; // FNV-1a offset
-    while (true) {
-      ifs.read(buffer.data(), static_cast<std::streamsize>(bufSize));
-      std::streamsize n = ifs.gcount();
-      if (n <= 0) break;
-
-      const unsigned char* data = reinterpret_cast<const unsigned char*>(buffer.data());
-
-      for (std::streamsize i = 0; i < n; ++i) {
-        hash ^= data[i];
-        hash *= 1099511628211ull;
-      }
-    }
-    return hash;
+  std::ifstream input(path, std::ios::binary);
+  if (!input) return std::nullopt;
+  XXH3_state_t state;
+  XXH3_64bits_reset(&state);
+  std::array<char, 64 * 1024> buffer;
+  std::uintmax_t bytesRead = 0;
+  while (!stop.stop_requested() && (input.read(buffer.data(), buffer.size()) || input.gcount() > 0)) {
+    const auto count = static_cast<size_t>(input.gcount());
+    bytesRead += count;
+    XXH3_64bits_update(&state, buffer.data(), count);
   }
-#else
-  std::optional<uint64_t> hashFileContents(const fs::path& p, size_t fileSize) {
-    std::ifstream ifs(p, std::ios::binary);
-    if (!ifs) return std::nullopt;
+  if (stop.stop_requested() || input.bad() || !input.eof() || bytesRead != size ||
+      fs::last_write_time(path, error) != modified || error)
+    return std::nullopt;
+  return FileFingerprint{ size, XXH3_64bits_digest(&state) };
+}
 
-    auto size = fileSize == 0 ? fs::file_size(p) : fileSize;
-
-    // small/medium files -> one-shot
-    if (size <= 1 * 1024 * 1024) { // 1MB threshold (tune this)
-      std::vector<char> data(size);
-      if (!ifs.read(data.data(), size)) return std::nullopt;
-      return XXH3_64bits(data.data(), size);
-    }
-
-    // large files -> streaming
-    XXH3_state_t* state = XXH3_createState();
-    XXH3_64bits_reset(state);
-
-    constexpr size_t bufSize = 64 * 1024;
-    char buffer[bufSize];
-
-    while (true) {
-      ifs.read(buffer, bufSize);
-      std::streamsize n = ifs.gcount();
-      if (n <= 0) break;
-      XXH3_64bits_update(state, buffer, static_cast<size_t>(n));
-    }
-
-    uint64_t hash = XXH3_64bits_digest(state);
-    XXH3_freeState(state);
-
-    return hash;
-  }
-#endif
-
-} // anonymous namespace
-
-DiffType diffFile(const fs::path& a, const fs::path& b, const DiffOptions& options)
+DiffType diffFile(const fs::path& a, const fs::path& b, const DiffOptions& options, std::stop_token stop)
 {
   bool ba = fs::exists(a);
   bool bb = fs::exists(b);
@@ -93,8 +58,8 @@ DiffType diffFile(const fs::path& a, const fs::path& b, const DiffOptions& optio
 
   bool identical = false;
   if (options.useHash) {
-    auto hashA = hashFileContents(a, sizeA);
-    auto hashB = hashFileContents(b, sizeB);
+    auto hashA = fingerprintFile(a, stop);
+    auto hashB = fingerprintFile(b, stop);
     identical = (hashA && hashB && *hashA == *hashB);
   } else {
     // Treating as modified for simplicity.

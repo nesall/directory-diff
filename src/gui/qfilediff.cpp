@@ -1,4 +1,5 @@
 #include "qfilediff.h"
+#include "filemutation.h"
 #include "qdirdiff.h"
 
 #include <QAbstractTableModel>
@@ -495,6 +496,11 @@ void QFileDiffWidget::saveFile(int side)
   const auto reportFailure = [&](const QString& detail) {
     showStatus(tr("Cannot save %1. %2").arg(target.path, detail));
   };
+  std::unique_lock lock(fileMutationMutex, std::try_to_lock);
+  if (!lock.owns_lock()) {
+    reportFailure(tr("A directory copy or delete is running. Try again when it finishes."));
+    return;
+  }
   const QFileInfo info(target.path);
   if (target.savedBytes) {
     QFile original(target.path);
@@ -525,6 +531,7 @@ void QFileDiffWidget::saveFile(int side)
     reportFailure(file.errorString());
     return;
   }
+  lock.unlock();
   target.savedBytes = std::move(bytes);
   target.dirty = false;
   model_->setFileState(side, false, false);

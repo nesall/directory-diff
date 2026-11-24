@@ -1,7 +1,10 @@
 #pragma once
 
 #include <filesystem>
+#include <cstdint>
 #include <functional>
+#include <optional>
+#include <stop_token>
 #include <string>
 #include <vector>
 
@@ -9,11 +12,20 @@
 enum class DiffType { Added, Removed, Modified, Identical };
 enum class DiffEntryKind { Missing, File, Directory };
 
+struct FileFingerprint {
+  std::uintmax_t size;
+  std::uint64_t hash;
+  bool operator==(const FileFingerprint&) const = default;
+};
+
 struct FileDiff {
   std::filesystem::path relativePath;
   DiffType type;
   DiffEntryKind leftKind = type == DiffType::Added ? DiffEntryKind::Missing : DiffEntryKind::File;
   DiffEntryKind rightKind = type == DiffType::Removed ? DiffEntryKind::Missing : DiffEntryKind::File;
+  std::filesystem::path rightRelativePath;
+  std::optional<FileFingerprint> leftFingerprint;
+  std::optional<FileFingerprint> rightFingerprint;
 };
 
 struct DiffOptions {
@@ -22,12 +34,16 @@ struct DiffOptions {
   bool includeIdentical = false;
   std::vector<std::string> ignorePatterns;
   bool includeDirectories = false;
+  bool captureFileFingerprints = false;
 };
+
+std::optional<FileFingerprint> fingerprintFile(const std::filesystem::path& path, std::stop_token stop = {});
 
 DiffType diffFile(
   const std::filesystem::path& a,
   const std::filesystem::path& b,
-  const DiffOptions& options);
+  const DiffOptions& options,
+  std::stop_token stop = {});
 
 
 

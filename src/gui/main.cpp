@@ -1,4 +1,5 @@
 #include <QApplication>
+#include <QThreadPool>
 #include "qmainwindow.h"
 
 int main(int argc, char* argv[])
@@ -8,9 +9,14 @@ int main(int argc, char* argv[])
   app.setOrganizationName("CrestCapitalGLOW");
   app.setOrganizationDomain("CrestCapitalGLOW.com");
 
-  QMainWindowDiff window;
-  window.resize(1200, 800);
-  window.show();
-
-  return app.exec();
+  int result;
+  {
+    QMainWindowDiff window;
+    window.resize(1200, 800);
+    window.show();
+    result = app.exec();
+  }
+  // Closing the window requests cancellation. Let workers release staged files before Qt shuts down.
+  QThreadPool::globalInstance()->waitForDone();
+  return result;
 }

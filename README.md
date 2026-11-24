@@ -29,12 +29,18 @@ $env:PATH = "$env:QT6_DIR\bin;$env:PATH"
 ```
 
 1. In the **Directory Diff** tab, enter or browse for the left and right folders.
-2. Click **Compare**. Use the toolbar filters to choose which result categories to show.
+2. Click **Compare**. The tab shows progress as it scans entries and compares file contents. Click **Cancel** to stop and discard the comparison. Use the toolbar filters to choose which result categories to show.
 3. For a file present on both sides, right-click its row and choose **Compare files** to open the text diff tab.
 
 Open **Settings** to save comparison exclusions. Enter one pattern per line, such as `*.tmp` for temporary files, `build/` for folders named `build` at any depth, or `third_party/cache/` for that folder relative to each comparison root. Saved rules apply to both panes on the next comparison and persist across sessions.
 
-In the directory view, use the context menu to copy selected entries between the compared roots or permanently delete an entry from one side. Folder copies merge into the destination and replace each file only after its copy succeeds. Folder operations cover their descendants, including entries excluded from comparison, and skip symbolic links and junctions. Delete asks for confirmation and the status bar reports partial failures.
+In the directory view, use the context menu to copy selected entries between the compared roots or permanently delete an entry from one side. Copy and delete run in the background. The tab shows the current path and completed entry count. **Cancel** stops the remaining work and keeps completed changes. The status bar reports skipped entries, and the comparison refreshes after the operation.
+
+Only one copy, delete, or File Diff save can write to disk at a time. You can keep browsing or comparing in other tabs while a directory operation runs.
+
+Folder copies merge into the destination. An existing file is replaced only when its contents still match the comparison. On Windows, case aliases are paired where the filesystem resolves them to the same entry, and copy preserves the destination spelling.
+
+Folder operations skip symbolic links and junctions. Copy can create excluded descendants, and it skips existing files excluded from the comparison because their contents could not be verified. Delete asks for confirmation and covers all descendants, including exclusions.
 
 For a standalone text comparison, select **New → File Diff**, choose both files, then click **Compare** or press **Enter** in a path field. Use **Previous Change** and **Next Change** to move between change blocks. Each side shows its own line numbers.
 
