@@ -7,10 +7,13 @@
 
 
 enum class DiffType { Added, Removed, Modified, Identical };
+enum class DiffEntryKind { Missing, File, Directory };
 
 struct FileDiff {
   std::filesystem::path relativePath;
   DiffType type;
+  DiffEntryKind leftKind = type == DiffType::Added ? DiffEntryKind::Missing : DiffEntryKind::File;
+  DiffEntryKind rightKind = type == DiffType::Removed ? DiffEntryKind::Missing : DiffEntryKind::File;
 };
 
 struct DiffOptions {
@@ -18,6 +21,7 @@ struct DiffOptions {
   bool ignoreHidden = false;
   bool includeIdentical = false;
   std::vector<std::string> ignorePatterns;
+  bool includeDirectories = false;
 };
 
 DiffType diffFile(

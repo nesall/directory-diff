@@ -1,8 +1,7 @@
 #include "directory-diff/dirdiff.h"
 #include <algorithm>
 #include <map>
-#include <fstream>
-#include <sstream>
+#include <atomic>
 #include <regex>
 #include <string>
 #include <thread>
@@ -56,8 +55,6 @@ namespace {
       }
     }
 
-    bool hasDirectoryRules() const { return !directories_.empty(); }
-
     bool matches(const fs::path& relativePath, bool directory) const {
       const auto& rules = directory ? directories_ : files_;
       if (rules.empty()) return false;
@@ -92,120 +89,90 @@ namespace {
     std::vector<Rule> directories_;
   };
 
-  template<typename OnFile>
-  void scanFiles(const fs::path& root, const DiffOptions& options, const IgnoreMatcher& ignore, OnFile onFile) {
+  template<typename OnEntry>
+  void scanEntries(const fs::path& root, const DiffOptions& options, const IgnoreMatcher& ignore, OnEntry onEntry) {
     fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied), end;
     for (; it != end; ++it) {
       const auto& entry = *it;
-      if (!entry.is_regular_file()) {
-        if (ignore.hasDirectoryRules() && entry.is_directory() && ignore.matches(entry.path().lexically_relative(root), true))
-          it.disable_recursion_pending();
+      const auto relativePath = entry.path().lexically_relative(root);
+      const bool directory = entry.is_directory();
+      if ((options.ignoreHidden && isHiddenPath(relativePath)) || ignore.matches(relativePath, directory)) {
+        if (directory) it.disable_recursion_pending();
         continue;
       }
 
-      fs::path relativePath;
-      try {
-        relativePath = fs::relative(entry.path(), root);
-      } catch (const fs::filesystem_error&) {
-        continue;
+      if (directory) {
+        if (options.includeDirectories)
+          onEntry(relativePath, DiffEntryKind::Directory);
+      } else if (entry.is_regular_file()) {
+        onEntry(relativePath, DiffEntryKind::File);
       }
-
-      if (options.ignoreHidden && isHiddenPath(relativePath)) continue;
-      if (ignore.matches(relativePath, false)) continue;
-      onFile(relativePath, entry.path());
     }
   }
-
-  struct FilePair {
-    fs::path relative;
-    fs::path pathA;
-    fs::path pathB;
-  };
-
 } // anonymous namespace
 
-
-// Example output format:
-// +added_file.txt
-// -removed_file.txt
-// ~modified_file.cpp
 size_t diffDirectories(
   const fs::path& dirA,
   const fs::path& dirB,
   const DiffOptions& options,
   DiffCallback onDiffFound)
 {
-  std::vector<FilePair> work;
-  std::map<fs::path, DiffType> fileMap;
+  struct ComparedEntry {
+    DiffEntryKind left = DiffEntryKind::Missing;
+    DiffEntryKind right = DiffEntryKind::Missing;
+    DiffType result = DiffType::Identical;
+  };
+
+  std::map<fs::path, ComparedEntry> entries;
   const IgnoreMatcher ignore(options.ignorePatterns);
-
-  // Scan dirA
-  scanFiles(dirA, options, ignore, [&](const fs::path& relativePath, const fs::path&) {
-    fileMap[relativePath] = DiffType::Removed; // Assume removed until we find it in dirB
+  scanEntries(dirA, options, ignore, [&](const fs::path& path, DiffEntryKind kind) {
+    entries[path].left = kind;
+  });
+  scanEntries(dirB, options, ignore, [&](const fs::path& path, DiffEntryKind kind) {
+    entries[path].right = kind;
   });
 
-  // Scan dirB
-  scanFiles(dirB, options, ignore, [&](const fs::path& relativePath, const fs::path& pathB) {
-    auto it = fileMap.find(relativePath);
-    if (it != fileMap.end()) {
-      const auto pathA = dirA / relativePath;
-      try {
-        bool sameSize = fs::file_size(pathA) == fs::file_size(pathB);
-        if (!sameSize) {
-          it->second = DiffType::Modified;
-          return;
-        }
-      } catch (const fs::filesystem_error&) {
-        it->second = DiffType::Modified; // If we can't get size, treat as modified
-        return;
-      }
-      work.push_back({ relativePath, pathA, pathB });
-    } else {
-      fileMap[relativePath] = DiffType::Added; // New file in dirB
-    }
-  });
+  using Entry = decltype(entries)::value_type;
+  std::vector<Entry*> pairs;
+  for (auto& entry : entries) {
+    auto& diff = entry.second;
+    if (diff.left == DiffEntryKind::Missing)
+      diff.result = DiffType::Added;
+    else if (diff.right == DiffEntryKind::Missing)
+      diff.result = DiffType::Removed;
+    else if (diff.left != diff.right)
+      diff.result = DiffType::Modified;
+    else if (diff.left == DiffEntryKind::File)
+      pairs.push_back(&entry);
+  }
 
-  std::atomic<size_t> nofIdentical = 0;
-
-  if (!work.empty()) {
-
-    const unsigned numThreads = std::min(
-      std::max(1u, std::thread::hardware_concurrency()),
-      static_cast<unsigned>(work.size()));
-
-    std::atomic<size_t> index = 0;
-    std::vector<DiffType> results(work.size());
-    std::vector<std::thread> threads;
-
-    for (unsigned t = 0; t < numThreads; ++t) {
-      threads.emplace_back([&]()
-        {
-          while (true) {
-            size_t i = index.fetch_add(1);
-            if (i >= work.size()) break;
-            const auto& job = work[i];
-            auto df = diffFile(job.pathA, job.pathB, options);
-            if (df == DiffType::Identical) {
-              ++nofIdentical;
-             }
-            results[i] = df;
+  if (!pairs.empty()) {
+    const auto numThreads = std::min<size_t>(std::max(1u, std::thread::hardware_concurrency()), pairs.size());
+    std::atomic<size_t> next = 0;
+    std::vector<std::jthread> threads;
+    for (size_t t = 0; t < numThreads; ++t) {
+      threads.emplace_back([&] {
+        while (true) {
+          const auto index = next.fetch_add(1);
+          if (index >= pairs.size()) break;
+          auto& [path, diff] = *pairs[index];
+          try {
+            diff.result = diffFile(dirA / path, dirB / path, options);
+          } catch (const fs::filesystem_error&) {
+            // A file may be removed or become unreadable during comparison.
+            diff.result = DiffType::Modified;
           }
-        });
-    }
-    for (auto& t : threads) t.join();
-
-    for (size_t i = 0; i < work.size(); ++i) {
-      fileMap[work[i].relative] = results[i];
-    }
-
-  }
-
-  // Report differences
-  for (const auto& [relativePath, diffType] : fileMap) {
-    if (options.includeIdentical || diffType != DiffType::Identical) {
-      onDiffFound({ relativePath, diffType });
+        }
+      });
     }
   }
 
-  return nofIdentical;
+  size_t identicalFiles = 0;
+  for (const auto& [path, diff] : entries) {
+    if (diff.result == DiffType::Identical && diff.left == DiffEntryKind::File)
+      ++identicalFiles;
+    if (options.includeIdentical || diff.result != DiffType::Identical)
+      onDiffFound({ path, diff.result, diff.left, diff.right });
+  }
+  return identicalFiles;
 }

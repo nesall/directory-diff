@@ -41,11 +41,11 @@ private Q_SLOTS:
 private:
   void setupViews();
   void syncExpansion(QTreeView* source, QTreeView* target, const QModelIndex& idx, bool expanded);
-  QString relPathForNode(DirDiffNode* node) const;
-  void copyFile(const QModelIndex& idx, bool leftToRight);
-  void copyDir(const QModelIndex& idx, bool leftToRight);
-  void copySelection(bool leftToRight);
-  void deleteFile(const QModelIndex &idx, bool leftSide);
+  QString relPathForNode(const DirDiffNode* node) const;
+  void copySelection(const QModelIndexList& selection, bool leftToRight);
+  void deleteEntry(const QModelIndex& idx, bool leftSide);
+  QModelIndexList operationSelection(QTreeView* source) const;
+  void startComparison(const QString& leftRoot, const QString& rightRoot, const QString& operation = {});
   void expandAll(bool expand);
 
 private:
@@ -66,6 +66,8 @@ private:
 
   // async worker
   QFutureWatcher<ComparisonResult>* watcher_ = nullptr;
+  QString operationSummary_;
+  bool comparing_ = false;
   bool syncingExpansion_ = false;
   bool syncingSelection_ = false;
 };
@@ -101,16 +103,16 @@ private:
 struct DirDiffNode {
   QString name;
   DiffType diffType = DiffType::Identical;
-  bool isDir = false;
-  bool existsOnLeft = false;
-  bool existsOnRight = false;
+  DiffEntryKind leftKind = DiffEntryKind::Missing;
+  DiffEntryKind rightKind = DiffEntryKind::Missing;
 
   DirDiffNode* parent = nullptr;
   std::vector<std::unique_ptr<DirDiffNode>> children;
 
-  DiffType properChildDiff() const;
+  DiffEntryKind kind(bool left) const { return left ? leftKind : rightKind; }
+  bool isDir() const;
 
-  DirDiffNode* findOrAddChild(const QString& childName, bool dir);
+  DirDiffNode* findOrAddChild(const QString& childName);
 };
 
 
@@ -127,6 +129,7 @@ enum class DiffColumn {
 enum DirDiffRole {
   DiffTypeRole = Qt::UserRole + 1,   // DiffType as int
   IsDirRole = Qt::UserRole + 2,
+  TypeConflictRole = Qt::UserRole + 3,
 };
 
 
@@ -155,7 +158,7 @@ public:
   DirDiffNode* nodeForIndex(const QModelIndex& idx) const;
 
 private:
-  void updateDirectories(DirDiffNode* node, const QString& relativePath);
+  void updateDirectories(DirDiffNode* node);
 
   std::unique_ptr<DirDiffNode> root_;
   QString dirA_;

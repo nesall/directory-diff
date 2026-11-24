@@ -8,7 +8,7 @@ Directory Diff is a C++20 and Qt 6 utility inspired by Araxis Merge's folder com
 | --- | --- |
 | [`CMakeLists.txt`](CMakeLists.txt) | Builds `directory_diff_lib`, `directory_diff_cli`, and `directory_diff_gui`. The `QT6_DIR` environment variable supplies the Qt kit path. |
 | [`include/directory-diff/`](include/directory-diff/) | Public comparison types and functions in `dirdiff.h` and `filediff.h`. Third-party headers live under `3rdparty/`. |
-| [`src/lib/dirdiff.cpp`](src/lib/dirdiff.cpp) | Recursive regular-file scan, relative-path matching, ignore patterns, and result callbacks. |
+| [`src/lib/dirdiff.cpp`](src/lib/dirdiff.cpp) | Recursive file and folder scan, relative-path matching, ignore patterns, and result callbacks. |
 | [`src/lib/filediff.cpp`](src/lib/filediff.cpp) | File size and xxHash comparison, line loading, Myers diff, and unified diff output. |
 | [`src/cli/main.cpp`](src/cli/main.cpp) | CLI11 commands `dir-diff` and `file-diff`. |
 | [`src/gui/qmainwindow.cpp`](src/gui/qmainwindow.cpp) | Main toolbar, tabs, directory filters, and opening a file diff from a directory result. |
@@ -27,7 +27,7 @@ The CLI and GUI share the UTF-8 text loader and Myers diff. Preserve both origin
 
 ## Directory file operations
 
-Resolve the source and destination against the comparison roots and the selected side, and check that the source exists before any write. Preserve an existing destination if copying fails. Recursive operations should report failures accurately, including partial success, and batch operations should refresh the comparison after processing the selection. The current copy loop can trigger a model reset during the batch. Keep the confirmation for deletion and show which side and path it will affect.
+Resolve operations against the roots of the displayed comparison and validate the selected entry on disk. Copy each file using atomic replacement. Capture the selected rows before changing the filesystem, then refresh once after the batch. Report partial failures and keep the deletion confirmation tied to the resolved path. A recursive operation skips symbolic links and junctions.
 
 ## Verification
 

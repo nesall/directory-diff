@@ -2,7 +2,7 @@
 
 Directory Diff is a C++20 utility for comparing two directory trees. Its side-by-side Qt interface is inspired by Araxis Merge's folder comparison. A command-line interface uses the same comparison engine.
 
-The directory comparison scans regular files recursively and matches them by relative path. It compares file sizes first, then hashes equal-sized pairs with xxHash. The GUI displays the results in two trees and can filter identical, modified, left-only, and right-only entries.
+The directory comparison scans regular files and folders, including empty folders, and matches them by relative path. It compares file sizes first, then hashes equal-sized pairs with xxHash. The GUI displays the results in two trees and can filter identical, modified, left-only, and right-only entries.
 
 The panes share a vertical layout. A file or folder present on only one side leaves a blank cell on the other side, so matching paths stay on the same line.
 
@@ -34,6 +34,8 @@ $env:PATH = "$env:QT6_DIR\bin;$env:PATH"
 
 Open **Settings** to save comparison exclusions. Enter one pattern per line, such as `*.tmp` for temporary files, `build/` for folders named `build` at any depth, or `third_party/cache/` for that folder relative to each comparison root. Saved rules apply to both panes on the next comparison and persist across sessions.
 
+In the directory view, use the context menu to copy selected entries between the compared roots or permanently delete an entry from one side. Folder copies merge into the destination and replace each file only after its copy succeeds. Folder operations cover their descendants, including entries excluded from comparison, and skip symbolic links and junctions. Delete asks for confirmation and the status bar reports partial failures.
+
 For a standalone text comparison, select **New → File Diff**, choose both files, then click **Compare** or press **Enter** in a path field. Use **Previous Change** and **Next Change** to move between change blocks. Each side shows its own line numbers.
 
 Select a changed row and choose **Apply to Left** or **Apply to Right** to copy that block into the destination. Use **Undo** to reverse an edit. **Save Left** and **Save Right** write their respective files and check for changes made on disk since the comparison or last save. A file opened from a one-sided directory result can be created by applying a block and then saving it.
@@ -46,14 +48,12 @@ Select a changed row and choose **Apply to Left** or **Apply to Right** to copy 
 .\build\release\directory_diff_cli.exe file-diff 'C:\src\left\main.cpp' 'C:\src\right\main.cpp'
 ```
 
-`dir-diff` lists `[+]` for right-only files, `[-]` for left-only files, and `[~]` for modified files. It reports the identical-file count separately. Quote the semicolon-separated value passed to `--ignore`. It accepts the same file and folder patterns as the GUI.
+`dir-diff` lists `[+]` for right-only entries, `[-]` for left-only entries, and `[~]` for changed files or file/folder conflicts. Folder paths have a trailing `/`. It reports the identical-file count separately. Quote the semicolon-separated value passed to `--ignore`. It accepts the same file and folder patterns as the GUI.
 
 `file-diff` compares UTF-8 text line by line and prints unified-style output. The GUI and CLI compare line contents independently of the line-ending style or UTF-8 BOM, and report a missing final newline as a change.
 
 ## Known limitations
 
-- **Empty directories.** A directory appears in the result tree when the scan reports at least one file below that path on either side.
 - **File comparison.** The viewer supports UTF-8 text. Very dissimilar regions can appear as one change block once the diff reaches its trace memory limit.
-- **File operations.** The directory view has directional copy and delete actions. Copying over an existing file removes the destination before attempting the replacement, and recursive copies can report success despite individual failures. Use disposable directories when trying these actions.
 
 Development notes and verification cases are in [AGENT.md](AGENT.md).

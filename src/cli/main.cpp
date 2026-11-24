@@ -73,6 +73,7 @@ int main(int argc, char* argv[]) {
       options.useHash = true;
       options.ignorePatterns = ignoreList;
       options.includeIdentical = false;
+      options.includeDirectories = true;
       size_t nofIdentical = diffDirectories(CLI::to_path(dir_a), CLI::to_path(dir_b), options, [&ansiColors](const FileDiff& diff) {
         char symbol = '?';
         switch (diff.type) {
@@ -82,7 +83,9 @@ int main(int argc, char* argv[]) {
         case DiffType::Identical: symbol = '='; break; // Should not be reported
         }
         std::string color = "\033[" + ansiColors[symbol] + "m";
-        fmt::print("{}[{}] \033[0m{}\n", color, symbol, diff.relativePath);
+        const auto suffix = diff.leftKind == DiffEntryKind::Directory || diff.rightKind == DiffEntryKind::Directory
+          ? "/" : "";
+        fmt::print("{}[{}] \033[0m{}{}\n", color, symbol, diff.relativePath, suffix);
         });
       std::cout << "Comparison complete." << std::endl;
       std::cout << "Nof identical files: " << nofIdentical << std::endl;
