@@ -3,11 +3,15 @@
 #include "qmainwindow.h"
 
 #include <QApplication>
+#include <QClipboard>
+#include <QDialog>
 #include <QDir>
 #include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
+#include <QFormLayout>
 #include <QLabel>
+#include <QMap>
 #include <QMenu>
 #include <QMessageBox>
 #include <QPushButton>
@@ -26,6 +30,14 @@ namespace {
   void check(bool condition, const char* message)
   {
     if (!condition) throw std::runtime_error(message);
+  }
+
+  QAction* actionNamed(QObject& owner, const QString& name)
+  {
+    for (auto* action : owner.findChildren<QAction*>()) {
+      if (action->text() == name) return action;
+    }
+    return nullptr;
   }
 
   void writeFile(const QDir& root, const QString& name, const QByteArray& bytes)
@@ -266,7 +278,7 @@ namespace {
     const auto mixed = rowNamed(model, "mixed");
     const auto changed = rowNamed(model, "changed", 0, mixed);
     expandedInBoth(matching, false, "A matching tree should start collapsed");
-    expandedInBoth(rowNamed(model, "matching", 0, mixed), false, "A matching branch should start collapsed");
+    expandedInBoth(rowNamed(model, "matching", 0, mixed), true, "Nested matching folders should start expanded");
     expandedInBoth(mixed, true, "An ancestor of changed entries should start expanded");
     expandedInBoth(changed, true, "A branch with a nested edit should start expanded");
     expandedInBoth(rowNamed(model, "nested", 0, changed), true, "A nested edit should be visible");
@@ -277,12 +289,112 @@ namespace {
 
     views.back()->expand(matching);
     expandedInBoth(matching, true, "Manually opening a matching folder should open both panes");
+    expandedInBoth(rowNamed(model, "nested", 0, matching), true, "Opening a matching root folder should show its contents");
     views.front()->collapse(matching);
     expandedInBoth(matching, false, "Manually closing a matching folder should close both panes");
 
     writeFile(right, "matching/nested/file.txt", "edit");
     waitForComparison(widget, [&] { widget.compareDirs(); });
     expandedInBoth(rowNamed(model, "matching"), true, "A formerly matching folder should open after a new change");
+  }
+
+  void clipboardActions(const QDir& left, const QDir& right)
+  {
+    const QString filename = QStringLiteral("日本語 file.txt");
+    const QString relative = QStringLiteral("folder/") + filename;
+    writeFile(left, relative, "left");
+    writeFile(right, relative, "right");
+
+    QDirDiffWidget widget;
+    widget.resize(900, 500);
+    widget.show();
+    compare(widget, left, right);
+    QApplication::processEvents();
+
+    for (auto* view : widget.findChildren<QTreeView*>()) {
+      const bool rightSide = view->isColumnHidden(0);
+      const int nameColumn = rightSide ? 2 : 0;
+      const auto folder = rowNamed(view->model(), "folder", nameColumn);
+      const auto file = rowNamed(view->model(), filename, nameColumn, folder.siblingAtColumn(0));
+      const auto copy = [&](const QModelIndex& index, const QString& name, const QString& expected) {
+        const QRect rect = view->visualRect(index);
+        check(rect.isValid(), "Clipboard test entry is missing or hidden");
+        QApplication::clipboard()->clear();
+        QTimer::singleShot(0, view, [&] {
+          auto* menu = qobject_cast<QMenu*>(QApplication::activePopupWidget());
+          if (!menu) return;
+          menu->close();
+          if (auto* action = actionNamed(*menu, name)) action->trigger();
+        });
+        check(QMetaObject::invokeMethod(view, "customContextMenuRequested", rect.center()),
+          "Directory context menu unavailable");
+        check(QApplication::clipboard()->text() == expected, "Context menu copied the wrong name or path");
+      };
+      copy(folder, "Copy Name", "folder");
+      copy(file, "Copy Name", filename);
+      copy(file, "Copy Relative Path", QDir::toNativeSeparators(relative));
+      const auto& root = rightSide ? right : left;
+      copy(file, "Copy Full Path", QDir::toNativeSeparators(root.filePath(relative)));
+    }
+  }
+
+  void comparisonStats(const QDir& left, const QDir& right)
+  {
+    for (const auto& root : { left, right }) writeFile(root, "folder/identical.txt", "same");
+    writeFile(left, "folder/changed.txt", "left");
+    writeFile(right, "folder/changed.txt", "right");
+    writeFile(left, "folder/left-only.txt", "left only");
+    writeFile(right, "folder/right-only.txt", "right only");
+    writeFile(left, "folder/excluded.tmp", "excluded");
+    writeFile(left, "conflict", "file");
+    writeFile(right, "conflict/child.txt", "folder");
+    QDirDiffWidget::setExclusions({ "*.tmp" });
+
+    QMainWindowDiff window;
+    window.show();
+    auto* stats = actionNamed(window, "Stats");
+    auto* fileDiff = actionNamed(window, "File Diff");
+    auto* tabs = window.findChild<QTabWidget*>();
+    auto* directory = tabs ? qobject_cast<QDirDiffWidget*>(tabs->currentWidget()) : nullptr;
+    check(stats && fileDiff && directory, "Directory Stats controls are missing");
+    check(!stats->isEnabled(), "Stats should be disabled before comparing");
+    compare(*directory, left, right);
+    check(stats->isEnabled(), "Stats should be enabled after a successful comparison");
+    directory->proxyModel()->setShowIdentical(false);
+
+    QMap<QString, QString> values;
+    QTimer::singleShot(0, &window, [&] {
+      auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+      if (!dialog) return;
+      if (auto* form = dialog->findChild<QFormLayout*>()) {
+        for (int row = 0; row < form->rowCount(); ++row) {
+          auto* label = qobject_cast<QLabel*>(form->itemAt(row, QFormLayout::LabelRole)->widget());
+          auto* field = qobject_cast<QLabel*>(form->itemAt(row, QFormLayout::FieldRole)->widget());
+          if (label && field) values.insert(label->text(), field->text());
+        }
+      }
+      dialog->accept();
+    });
+    stats->trigger();
+    check(values.value("Entries scanned") == "12", "Stats should include visited entries from both roots");
+    check(values.value("Files included (left / right)") == "4 / 4", "Stats should omit excluded files");
+    check(values.value("Folders included (left / right)") == "1 / 2", "Stats should count folders per root");
+    check(values.value("Identical file pairs") == "1", "Stats should count identical files hidden by the filter");
+    check(values.value("Differences") == "5" && values.value("Modified file pairs") == "1" &&
+      values.value("Left-only entries") == "1" && values.value("Right-only entries") == "2" &&
+      values.value("File/folder conflicts") == "1", "Stats difference breakdown is incorrect");
+
+    fileDiff->trigger();
+    check(!stats->isEnabled(), "Stats should be disabled on File Diff tabs");
+    tabs->setCurrentWidget(directory);
+    check(stats->isEnabled(), "Switching back should restore Stats for the directory tab");
+    waitForComparison(*directory, [&] {
+      OccupiedPool occupied;
+      directory->compareDirs();
+      check(!stats->isEnabled(), "Stats should be disabled while a new comparison is pending");
+      cancelJob(*directory);
+    });
+    check(!stats->isEnabled(), "A canceled comparison should leave Stats disabled");
   }
 
   void fileTabWidth()
@@ -296,13 +408,7 @@ namespace {
     QApplication::processEvents();
     const int originalWidth = window.width();
 
-    QAction* newFileDiff = nullptr;
-    for (auto* action : window.findChildren<QAction*>()) {
-      if (action->text() == "File Diff") {
-        newFileDiff = action;
-        break;
-      }
-    }
+    auto* newFileDiff = actionNamed(window, "File Diff");
     check(newFileDiff, "New File Diff action is missing");
     newFileDiff->trigger();
     QApplication::processEvents();
@@ -422,6 +528,10 @@ int main(int argc, char** argv)
       comparisonProgress(left, right);
     else if (test == "folder-expansion")
       folderExpansion(left, right);
+    else if (test == "clipboard-actions")
+      clipboardActions(left, right);
+    else if (test == "comparison-stats")
+      comparisonStats(left, right);
     else if (test == "file-tab-width")
       fileTabWidth();
     else

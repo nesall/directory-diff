@@ -3,6 +3,10 @@
 #include <QSplitter>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
+#include <QClipboard>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QFormLayout>
 #include <QFileDialog>
 #include <QScrollBar>
 #include <QSettings>
@@ -20,6 +24,7 @@
 #include <QHash>
 #include <QSet>
 #include <QLabel>
+#include <QLocale>
 #include <QtConcurrent/QtConcurrent>
 #include <QFutureWatcher>
 #include <QProgressBar>
@@ -421,14 +426,26 @@ void QDirDiffWidget::setupViews()
         menu.addSeparator();
         auto *actLR = menu.addAction(QIcon(":/arrow-right-from-line"), tr("Copy Left to Right"), QKeySequence("Ctrl+W"));
         auto *actRL = menu.addAction(QIcon(":/arrow-left-from-line"), tr("Copy Right to Left"), QKeySequence("Ctrl+Q"));
+        DirDiffNode *node = model_->nodeForIndex(proxy_->mapToSource(idx));
+        const bool leftSide = v == viewLeft_;
+        const bool existsOnSide = node->kind(leftSide) != DiffEntryKind::Missing;
+        if (existsOnSide) {
+          const auto addClipboardAction = [&](const QString &label, const QString &value) {
+            menu.addAction(label, this, [value] { QApplication::clipboard()->setText(value); });
+          };
+          const QString root = leftSide ? model_->leftRoot() : model_->rightRoot();
+          const QString relative = relPathForNode(node, leftSide);
+          menu.addSeparator();
+          addClipboardAction(tr("Copy Name"), node->nameOnSide(leftSide));
+          addClipboardAction(tr("Copy Full Path"), QDir::toNativeSeparators(QDir(root).filePath(relative)));
+          addClipboardAction(tr("Copy Relative Path"), QDir::toNativeSeparators(relative));
+        }
         menu.addSeparator();
         static QIcon iconDel; 
         if (iconDel.isNull())
           iconDel = QApplication::style()->standardIcon(QStyle::SP_TrashIcon);
         auto *actDel = menu.addAction(tr("Delete"));
 
-        DirDiffNode *node = model_->nodeForIndex(proxy_->mapToSource(idx));
-        const bool existsOnSide = node->kind(v == viewLeft_) != DiffEntryKind::Missing;
         actView->setEnabled(!node->isDir());
         const auto hasSource = [&](bool left) {
           return std::any_of(selectedIndexes.begin(), selectedIndexes.end(), [&](const QModelIndex &selected) {
@@ -860,19 +877,21 @@ void QDirDiffWidget::deleteEntry(const QModelIndex &idx, bool leftSide)
   });
 }
 
-void QDirDiffWidget::expandChangedFolders(const QModelIndex &parent)
+void QDirDiffWidget::setInitialExpansion()
 {
-  const int rows = proxy_->rowCount(parent);
-  for (int row = 0; row < rows; ++row) {
-    const auto index = proxy_->index(row, 0, parent);
-    if (!index.data(IsDirRole).toBool() ||
-        index.data(DiffTypeRole).toInt() == static_cast<int>(DiffType::Identical) ||
-        !proxy_->hasChildren(index))
-      continue;
+  const QSignalBlocker blockLeft(viewLeft_);
+  const QSignalBlocker blockRight(viewRight_);
+  viewLeft_->expandAll();
+  viewRight_->expandAll();
 
-    // The shared expansion handler opens the corresponding row on the right.
-    viewLeft_->expand(index);
-    expandChangedFolders(index);
+  const int rows = proxy_->rowCount();
+  for (int row = 0; row < rows; ++row) {
+    const auto index = proxy_->index(row, 0);
+    if (index.data(IsDirRole).toBool() &&
+        index.data(DiffTypeRole).toInt() == static_cast<int>(DiffType::Identical)) {
+      viewLeft_->collapse(index);
+      viewRight_->collapse(index);
+    }
   }
 }
 
@@ -884,6 +903,68 @@ QString QDirDiffWidget::leftPath() const
 QString QDirDiffWidget::rightPath() const
 {
   return headerRight_->currentPath();
+}
+
+void QDirDiffWidget::ComparisonStats::record(const FileDiff &entry)
+{
+  leftFiles += entry.leftKind == DiffEntryKind::File;
+  rightFiles += entry.rightKind == DiffEntryKind::File;
+  leftFolders += entry.leftKind == DiffEntryKind::Directory;
+  rightFolders += entry.rightKind == DiffEntryKind::Directory;
+
+  switch (entry.type) {
+  case DiffType::Identical:
+    if (entry.leftKind == DiffEntryKind::File) ++identicalFiles;
+    break;
+  case DiffType::Modified:
+    if (entry.leftKind == entry.rightKind) ++modifiedFiles;
+    else ++typeConflicts;
+    break;
+  case DiffType::Removed: ++leftOnly; break;
+  case DiffType::Added: ++rightOnly; break;
+  }
+}
+
+void QDirDiffWidget::showComparisonStats()
+{
+  if (!hasComparisonStats()) return;
+  const auto &stats = *comparisonStats_;
+  QDialog dialog(this);
+  dialog.setWindowTitle(tr("Directory Comparison Stats"));
+  auto *layout = new QVBoxLayout(&dialog);
+  auto *form = new QFormLayout;
+  form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+  layout->addLayout(form);
+
+  const auto addPath = [&](const QString &label, const QString &root) {
+    auto *field = new QLineEdit(QDir::toNativeSeparators(root), &dialog);
+    field->setReadOnly(true);
+    field->setCursorPosition(0);
+    form->addRow(label, field);
+  };
+  const QLocale locale;
+  const auto count = [&](size_t value) { return locale.toString(static_cast<qulonglong>(value)); };
+  const auto addCount = [&](const QString &label, const QString &value) {
+    form->addRow(label, new QLabel(value, &dialog));
+  };
+  addPath(tr("Left root"), model_->leftRoot());
+  addPath(tr("Right root"), model_->rightRoot());
+  addCount(tr("Entries scanned"), count(stats.scanned));
+  addCount(tr("Files included (left / right)"), tr("%1 / %2").arg(count(stats.leftFiles), count(stats.rightFiles)));
+  addCount(tr("Folders included (left / right)"), tr("%1 / %2").arg(count(stats.leftFolders), count(stats.rightFolders)));
+  addCount(tr("Differences"), count(stats.differences()));
+  addCount(tr("Identical file pairs"), count(stats.identicalFiles));
+  addCount(tr("Modified file pairs"), count(stats.modifiedFiles));
+  addCount(tr("Left-only entries"), count(stats.leftOnly));
+  addCount(tr("Right-only entries"), count(stats.rightOnly));
+  addCount(tr("File/folder conflicts"), count(stats.typeConflicts));
+
+  auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+  connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+  layout->addWidget(buttons);
+  buttons->setFocus();
+  dialog.resize(460, dialog.sizeHint().height());
+  dialog.exec();
 }
 
 QStringList QDirDiffWidget::exclusions()
@@ -911,6 +992,7 @@ void QDirDiffWidget::compareDirs()
 
 void QDirDiffWidget::beginJob(Job kind)
 {
+  const bool hadStats = hasComparisonStats();
   jobKind_ = kind;
   job_ = std::make_shared<QDirDiffJobState>();
   headerLeft_->setEnabled(false);
@@ -919,6 +1001,7 @@ void QDirDiffWidget::beginJob(Job kind)
   progressRow_->show();
   updateProgress();
   progressTimer_->start();
+  if (hadStats) emit comparisonStatsAvailabilityChanged();
 }
 
 void QDirDiffWidget::endJob()
@@ -928,6 +1011,7 @@ void QDirDiffWidget::endJob()
   progressRow_->hide();
   headerLeft_->setEnabled(true);
   headerRight_->setEnabled(true);
+  if (hasComparisonStats()) emit comparisonStatsAvailabilityChanged();
 }
 
 void QDirDiffWidget::showStatus(const QString &message)
@@ -1010,6 +1094,7 @@ void QDirDiffWidget::onFileOperationFinished()
 void QDirDiffWidget::startComparison(const QString &a, const QString &b, const QString &operation)
 {
   beginJob(Job::Compare);
+  comparisonStats_.reset();
   operationSummary_ = operation;
   if (operation.isEmpty())
     emit compareStarted();
@@ -1024,7 +1109,7 @@ void QDirDiffWidget::startComparison(const QString &a, const QString &b, const Q
     opts.ignorePatterns.push_back(pattern.toStdString());
 
   auto future = QtConcurrent::run([a, b, opts = std::move(opts), job = job_] {
-    ComparisonResult result{ a, b, {}, {} };
+    ComparisonResult result{ a, b };
     if (job->stop.stop_requested()) return result;
     if (!QFileInfo(a).isDir()) {
       result.error = tr("Cannot open the left directory \"%1\".").arg(a);
@@ -1038,7 +1123,11 @@ void QDirDiffWidget::startComparison(const QString &a, const QString &b, const Q
     try {
       diffDirectories(
         QDir(a).filesystemPath(), QDir(b).filesystemPath(), opts,
-        [&](const FileDiff &fd) { result.files.push_back(fd); }, job->stop.get_token(), &job->comparison);
+        [&](const FileDiff &entry) {
+          result.files.push_back(entry);
+          result.stats.record(entry);
+        }, job->stop.get_token(), &job->comparison);
+      result.stats.scanned = job->comparison.scanned.load();
     } catch (const std::filesystem::filesystem_error &error) {
       const QString path = QFileInfo(error.path1()).filePath();
       const QString reason = QString::fromLocal8Bit(error.code().message().c_str());
@@ -1067,10 +1156,9 @@ void QDirDiffWidget::onDiffFinished()
       model_->setDiffResults(result.files, result.leftRoot, result.rightRoot);
       viewLeft_->header()->resizeSections(QHeaderView::ResizeToContents);
       viewRight_->header()->resizeSections(QHeaderView::ResizeToContents);
-      expandChangedFolders();
-      const auto differences = std::count_if(result.files.begin(), result.files.end(),
-        [](const FileDiff &entry) { return entry.type != DiffType::Identical; });
-      message = tr("Done. %1 differences found.").arg(differences);
+      setInitialExpansion();
+      comparisonStats_ = result.stats;
+      message = tr("Done. %1 differences found.").arg(result.stats.differences());
     }
   }
 

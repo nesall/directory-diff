@@ -24,6 +24,7 @@ private:
   void createToolBar();
   void createCentralWidgets();
   void showSettings();
+  void updateStatsAction();
 
   QTabWidget* tabWidget()       const;
   QDirDiffWidget* currentDirDiff()  const;
@@ -32,4 +33,5 @@ private:
   QAction* actNewDirDiff_ = nullptr;
   QAction* actNewFileDiff_ = nullptr;
   QAction* actCompare_ = nullptr;
+  QAction* actStats_ = nullptr;
 };

@@ -9,6 +9,7 @@
 #include <QSortFilterProxyModel>
 
 #include <memory>
+#include <optional>
 
 #include "directory-diff/dirdiff.h"
 
@@ -37,11 +38,14 @@ public:
   QString leftPath()  const;
   QString rightPath() const;
   QString statusText() const { return statusText_; }
+  bool hasComparisonStats() const { return comparisonStats_.has_value() && !job_; }
+  void showComparisonStats();
 
 Q_SIGNALS:
   void statusMessage(const QString& msg);
   void compareStarted();
   void compareFinished();
+  void comparisonStatsAvailabilityChanged();
   void compareFileRequested(const QString &leftFile, const QString &rightFile, bool leftMissing, bool rightMissing);
 
 private Q_SLOTS:
@@ -63,14 +67,31 @@ private:
   void endJob();
   void updateProgress();
   void showStatus(const QString& message);
-  void expandChangedFolders(const QModelIndex& parent = {});
+  void setInitialExpansion();
 
 private:
+  struct ComparisonStats {
+    size_t scanned = 0;
+    size_t leftFiles = 0;
+    size_t rightFiles = 0;
+    size_t leftFolders = 0;
+    size_t rightFolders = 0;
+    size_t identicalFiles = 0;
+    size_t modifiedFiles = 0;
+    size_t leftOnly = 0;
+    size_t rightOnly = 0;
+    size_t typeConflicts = 0;
+
+    void record(const FileDiff& entry);
+    size_t differences() const { return modifiedFiles + leftOnly + rightOnly + typeConflicts; }
+  };
+
   struct ComparisonResult {
     QString leftRoot;
     QString rightRoot;
     std::vector<FileDiff> files;
     QString error;
+    ComparisonStats stats;
   };
 
   struct OperationResult {
@@ -97,6 +118,7 @@ private:
   QTimer* progressTimer_ = nullptr;
   QString operationSummary_;
   QString statusText_;
+  std::optional<ComparisonStats> comparisonStats_;
   bool syncingExpansion_ = false;
   bool syncingSelection_ = false;
 };

@@ -42,6 +42,11 @@ void QMainWindowDiff::createToolBar()
 
   actCompare_ = mainToolBar_->addAction(tr("Compare"));
   actCompare_->setIcon(QIcon::fromTheme(":/refresh"));
+  actStats_ = mainToolBar_->addAction(QIcon(":/line-chart"), tr("Stats"), this, [this] {
+    if (auto *directory = currentDirDiff()) directory->showComparisonStats();
+  });
+  actStats_->setToolTip(tr("Show directory comparison statistics"));
+  actStats_->setEnabled(false);
   auto *settingsAction = mainToolBar_->addAction(QIcon(":/cog"), tr("Settings"));
   settingsAction->setToolTip(tr("Edit directory comparison exclusions"));
   connect(settingsAction, &QAction::triggered, this, &QMainWindowDiff::showSettings);
@@ -110,8 +115,7 @@ void QMainWindowDiff::createToolBar()
       tab->setTabText(index, left.length() > 20 ? QStringLiteral("...") + left.right(20) : left);
       tab->setTabToolTip(index, tr("Comparing %1 vs %2").arg(left, w->rightPath()));
       });
-    connect(w, &QDirDiffWidget::compareFinished, [this] {
-      });
+    connect(w, &QDirDiffWidget::comparisonStatsAvailabilityChanged, this, &QMainWindowDiff::updateStatsAction);
     connect(w, &QDirDiffWidget::compareFileRequested, this, &QMainWindowDiff::compareFileRequested);
     });
 
@@ -180,6 +184,7 @@ void QMainWindowDiff::createCentralWidgets()
     const auto *file = qobject_cast<QFileDiffWidget *>(central->currentWidget());
     const QString status = directory ? directory->statusText() : file ? file->statusText() : QString();
     statusBar()->showMessage(status.isEmpty() ? tr("Ready") : status);
+    updateStatsAction();
     });
   actNewDirDiff_->trigger();
   connect(central, &QTabWidget::tabCloseRequested, this, [central](int index) {
@@ -215,6 +220,12 @@ QTabWidget *QMainWindowDiff::tabWidget() const
 QDirDiffWidget *QMainWindowDiff::currentDirDiff() const
 {
   return qobject_cast<QDirDiffWidget *>(tabWidget()->currentWidget());
+}
+
+void QMainWindowDiff::updateStatsAction()
+{
+  const auto *directory = currentDirDiff();
+  actStats_->setEnabled(directory && directory->hasComparisonStats());
 }
 
 void QMainWindowDiff::compareFileRequested(const QString &leftFile, const QString &rightFile,
